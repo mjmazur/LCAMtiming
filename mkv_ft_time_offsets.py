@@ -544,6 +544,15 @@ def has_negative_offsets(offsets_seconds: np.ndarray) -> bool:
     return bool(np.any(offsets_seconds < 0.0))
 
 
+def try_create_plot(plot_name: str, create_plot_fn) -> bool:
+    try:
+        create_plot_fn()
+        return True
+    except Exception as exc:
+        print(f"Warning: failed to create {plot_name}: {exc}")
+        return False
+
+
 def analyze_single_mkv(
     mkv_path: Path,
     station_id: str,
@@ -602,8 +611,12 @@ def analyze_single_mkv(
             print(f"  {index},{offset_ms:.6f},{optimized_offset_ms:.6f}")
 
     if plot_output is not None:
-        plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
-        print(f"Saved offset plot to: {plot_output}")
+        created = try_create_plot(
+            f"offset plot ({plot_output})",
+            lambda: plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output),
+        )
+        if created:
+            print(f"Saved offset plot to: {plot_output}")
 
     return offsets, optimized_offsets, optimized_fps
 
@@ -873,8 +886,12 @@ def main() -> int:
             (label, optimized_offsets, optimized_fps)
             for label, _, optimized_offsets, optimized_fps in combined_curves
         ]
-        plot_combined_optimized_offsets(optimized_only_curves, plot_output)
-        print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+        created = try_create_plot(
+            f"combined optimized-offset plot ({plot_output})",
+            lambda: plot_combined_optimized_offsets(optimized_only_curves, plot_output),
+        )
+        if created:
+            print(f"\nSaved combined optimized-offset plot to: {plot_output}")
 
         sample_count = min(5, len(combined_curves))
         sampled_curves = random.sample(combined_curves, k=sample_count)
@@ -885,37 +902,57 @@ def main() -> int:
             sample_plot = plot_output.with_name(
                 f"{plot_output.stem}_sample_{index}_{sanitize_for_filename(label)}.png"
             )
-            plot_single_optimized_curve(
-                label,
-                nominal_offsets,
-                offsets,
-                optimized_fps,
-                args.fps,
-                sample_plot,
+            created = try_create_plot(
+                f"single optimized curve plot ({sample_plot})",
+                lambda label=label, nominal_offsets=nominal_offsets, offsets=offsets, optimized_fps=optimized_fps, sample_plot=sample_plot: plot_single_optimized_curve(
+                    label,
+                    nominal_offsets,
+                    offsets,
+                    optimized_fps,
+                    args.fps,
+                    sample_plot,
+                ),
             )
-            print(f"Saved single optimized curve plot to: {sample_plot}")
+            if created:
+                print(f"Saved single optimized curve plot to: {sample_plot}")
 
         fps_plot = plot_output.with_name(f"{plot_output.stem}_optimized_fps.png")
-        plot_optimized_frame_rates(optimized_only_curves, fps_plot)
-        print(f"Saved optimized frame-rate plot to: {fps_plot}")
+        created = try_create_plot(
+            f"optimized frame-rate plot ({fps_plot})",
+            lambda: plot_optimized_frame_rates(optimized_only_curves, fps_plot),
+        )
+        if created:
+            print(f"Saved optimized frame-rate plot to: {fps_plot}")
 
         summary_band_plot = plot_output.with_name(
             f"{plot_output.stem}_optimized_offset_summary_band.png"
         )
-        plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot)
-        print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
+        created = try_create_plot(
+            f"optimized offset-summary band plot ({summary_band_plot})",
+            lambda: plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot),
+        )
+        if created:
+            print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
 
         offset_hist_plot = plot_output.with_name(
             f"{plot_output.stem}_optimized_offset_hist.png"
         )
-        plot_optimized_offset_histogram(optimized_only_curves, offset_hist_plot)
-        print(f"Saved optimized offset histogram to: {offset_hist_plot}")
+        created = try_create_plot(
+            f"optimized offset histogram ({offset_hist_plot})",
+            lambda: plot_optimized_offset_histogram(optimized_only_curves, offset_hist_plot),
+        )
+        if created:
+            print(f"Saved optimized offset histogram to: {offset_hist_plot}")
 
         fps_hist_plot = plot_output.with_name(
             f"{plot_output.stem}_optimized_fps_hist.png"
         )
-        plot_optimized_fps_histogram(optimized_only_curves, fps_hist_plot)
-        print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
+        created = try_create_plot(
+            f"optimized frame-rate histogram ({fps_hist_plot})",
+            lambda: plot_optimized_fps_histogram(optimized_only_curves, fps_hist_plot),
+        )
+        if created:
+            print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
     else:
         print(
             "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
