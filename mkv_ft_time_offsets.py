@@ -359,15 +359,57 @@ def plot_offsets(
     plt.close()
 
 
+def plot_combined_optimized_offsets(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    if not curves:
+        raise ValueError("No optimized curves available to plot")
+
+    all_offsets_ms = np.concatenate([curve_offsets * 1000.0 for _, curve_offsets, _ in curves])
+    min_ms = float(np.min(all_offsets_ms))
+    max_ms = float(np.max(all_offsets_ms))
+
+    if np.isclose(min_ms, max_ms):
+        pad_ms = max(1.0, abs(min_ms) * 0.05)
+    else:
+        pad_ms = (max_ms - min_ms) * 0.05
+
+    y_min = min_ms - pad_ms
+    y_max = max_ms + pad_ms
+
+    plt.figure(figsize=(12, 6))
+    for label, curve_offsets, optimized_fps in curves:
+        frame_idx = np.arange(len(curve_offsets))
+        curve_ms = curve_offsets * 1000.0
+        plt.plot(
+            frame_idx,
+            curve_ms,
+            linewidth=1.0,
+            label=f"{label} (opt FPS={optimized_fps:.6f})",
+        )
+
+    plt.xlabel("Frame index")
+    plt.ylabel("Offset (FT - implied) [ms]")
+    plt.title("Optimized MKV offset curves")
+    plt.ylim(y_min, y_max)
+    plt.legend(loc="best", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def analyze_single_mkv(
     mkv_path: Path,
     station_id: str,
     mkv_start_utc: datetime,
     frame_rate: float,
     ft_times: np.ndarray,
-    plot_output: Path,
+    plot_output: Path | None,
     print_offsets_by_frame: bool,
-) -> None:
+) -> tuple[np.ndarray, float]:
     frame_count = run_ffprobe_frame_count(mkv_path)
     print(f"\nMKV file: {mkv_path}")
     print(f"Station in filename: {station_id}")
@@ -416,8 +458,11 @@ def analyze_single_mkv(
             optimized_offset_ms = optimized_offsets[index] * 1000.0
             print(f"  {index},{offset_ms:.6f},{optimized_offset_ms:.6f}")
 
-    plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
-    print(f"Saved offset plot to: {plot_output}")
+    if plot_output is not None:
+        plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
+        print(f"Saved offset plot to: {plot_output}")
+
+    return optimized_offsets, optimized_fps
 
 
 def run_batch_mkv_task(
@@ -427,24 +472,24 @@ def run_batch_mkv_task(
     frame_rate: float,
     ft_times: np.ndarray,
     plot_output_str: str,
-) -> str:
+) -> tuple[str, str, np.ndarray, float]:
     mkv_path = Path(mkv_path_str)
     mkv_start_utc = datetime.fromisoformat(mkv_start_iso)
-    plot_output = Path(plot_output_str)
+    _plot_output = Path(plot_output_str)
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
-        analyze_single_mkv(
+        optimized_offsets, optimized_fps = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
             frame_rate=frame_rate,
             ft_times=ft_times,
-            plot_output=plot_output,
+            plot_output=None,
             print_offsets_by_frame=False,
         )
 
-    return output_buffer.getvalue()
+    return output_buffer.getvalue(), mkv_path.stem, optimized_offsets, optimized_fps
 
 
 def main() -> int:
@@ -592,6 +637,8 @@ def main() -> int:
     print(f"Overlapping days found: {len(overlap_days)}")
     print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
 
+    combined_curves: list[tuple[str, np.ndarray, float]] = []
+
     for day_key in selected_days:
         day_mkv_files = mkv_by_day[day_key]
         day_ft_files = ft_by_day[day_key]
@@ -602,26 +649,21 @@ def main() -> int:
 
         if args.workers == 1:
             for mkv_item in day_mkv_files:
-                per_file_plot = plot_output.with_name(
-                    f"{mkv_item.path.stem}_mkv_ft_time_offsets.png"
-                )
-                analyze_single_mkv(
+                optimized_offsets, optimized_fps = analyze_single_mkv(
                     mkv_path=mkv_item.path,
                     station_id=mkv_item.station_id,
                     mkv_start_utc=mkv_item.start_utc,
                     frame_rate=args.fps,
                     ft_times=day_ft_times,
-                    plot_output=per_file_plot,
+                    plot_output=None,
                     print_offsets_by_frame=False,
                 )
+                combined_curves.append((mkv_item.path.stem, optimized_offsets, optimized_fps))
             continue
 
         print(f"Processing day {day_key} MKV files with multiprocessing workers={args.workers}")
         task_args: list[tuple[str, str, str, float, np.ndarray, str]] = []
         for mkv_item in day_mkv_files:
-            per_file_plot = plot_output.with_name(
-                f"{mkv_item.path.stem}_mkv_ft_time_offsets.png"
-            )
             task_args.append(
                 (
                     str(mkv_item.path),
@@ -629,14 +671,20 @@ def main() -> int:
                     mkv_item.start_utc.isoformat(),
                     args.fps,
                     day_ft_times,
-                    str(per_file_plot),
+                    "",
                 )
             )
 
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = [executor.submit(run_batch_mkv_task, *task) for task in task_args]
             for future in as_completed(futures):
-                print(future.result(), end="")
+                output_text, label, optimized_offsets, optimized_fps = future.result()
+                print(output_text, end="")
+                combined_curves.append((label, optimized_offsets, optimized_fps))
+
+    if combined_curves:
+        plot_combined_optimized_offsets(combined_curves, plot_output)
+        print(f"\nSaved combined optimized-offset plot to: {plot_output}")
 
     return 0
 
