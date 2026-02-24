@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 import re
 import subprocess
 import sys
@@ -126,6 +128,26 @@ def group_mkv_by_day(mkv_files: list[MKVFileMeta]) -> dict[str, list[MKVFileMeta
         day_key = item.start_utc.strftime("%Y%m%d")
         grouped.setdefault(day_key, []).append(item)
     return grouped
+
+
+def match_ft_to_mkv(ft_files: list[FTFileMeta], mkv_files: list[MKVFileMeta]) -> list[tuple[FTFileMeta, MKVFileMeta]]:
+    mkv_by_day = group_mkv_by_day(mkv_files)
+    matched: list[tuple[FTFileMeta, MKVFileMeta]] = []
+
+    for ft_file in ft_files:
+        day_key = ft_file.timestamp.strftime("%Y%m%d")
+        day_mkvs = mkv_by_day.get(day_key, [])
+        if not day_mkvs:
+            continue
+
+        ft_ts = ft_file.timestamp.replace(tzinfo=timezone.utc).timestamp()
+        closest_mkv = min(
+            day_mkvs,
+            key=lambda mkv_item: abs(mkv_item.start_utc.timestamp() - ft_ts),
+        )
+        matched.append((ft_file, closest_mkv))
+
+    return matched
 
 
 def run_ffprobe_frame_count(mkv_path: Path) -> int:
@@ -356,6 +378,41 @@ def plot_offsets(
     plt.close()
 
 
+def plot_batch_offsets(
+    batch_series: list[tuple[np.ndarray, np.ndarray, str]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    if not batch_series:
+        return
+
+    all_offsets = np.concatenate([series[1] for series in batch_series])
+    min_ms = float(np.min(all_offsets))
+    max_ms = float(np.max(all_offsets))
+
+    if np.isclose(min_ms, max_ms):
+        pad_ms = max(1.0, abs(min_ms) * 0.05)
+    else:
+        pad_ms = (max_ms - min_ms) * 0.05
+
+    y_min = min_ms - pad_ms
+    y_max = max_ms + pad_ms
+
+    plt.figure(figsize=(12, 6))
+    for frame_idx, offsets_ms, label in batch_series:
+        plt.plot(frame_idx, offsets_ms, linewidth=1.0, label=label)
+
+    plt.xlabel("Frame index")
+    plt.ylabel("Offset (FT - implied) [ms]")
+    plt.title("Optimized offsets for matched FT/MKV files")
+    plt.ylim(y_min, y_max)
+    plt.legend(loc="best", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def analyze_single_mkv(
     mkv_path: Path,
     station_id: str,
@@ -364,7 +421,8 @@ def analyze_single_mkv(
     ft_times: np.ndarray,
     plot_output: Path,
     print_offsets_by_frame: bool,
-) -> None:
+    generate_plot: bool,
+) -> tuple[np.ndarray, np.ndarray, str]:
     frame_count = run_ffprobe_frame_count(mkv_path)
     print(f"\nMKV file: {mkv_path}")
     print(f"Station in filename: {station_id}")
@@ -413,8 +471,71 @@ def analyze_single_mkv(
             optimized_offset_ms = optimized_offsets[index] * 1000.0
             print(f"  {index},{offset_ms:.6f},{optimized_offset_ms:.6f}")
 
-    plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
-    print(f"Saved offset plot to: {plot_output}")
+    if generate_plot:
+        plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
+        print(f"Saved offset plot to: {plot_output}")
+
+    label = f"{mkv_path.stem} vs {Path(plot_output).stem}"
+    return np.arange(frame_count), optimized_offsets * 1000.0, label
+
+
+def analyze_batch_pair_task(
+    task: tuple[int, str, str, str, float, float, str]
+) -> tuple[int, np.ndarray, np.ndarray, str, list[str]]:
+    (
+        pair_index,
+        ft_path_str,
+        mkv_path_str,
+        station_id,
+        mkv_start_ts,
+        frame_rate,
+        rms_root_str,
+    ) = task
+
+    ft_path = Path(ft_path_str)
+    mkv_path = Path(mkv_path_str)
+    rms_root = Path(rms_root_str)
+
+    ft_meta = parse_ft_filename(ft_path)
+    if ft_meta is None:
+        raise ValueError(f"FT filename format not recognized: {ft_path}")
+
+    ft_times = collect_ft_times_seconds([ft_meta], rms_root)
+
+    frame_count = run_ffprobe_frame_count(mkv_path)
+    frame_indices = np.arange(frame_count, dtype=np.float64)
+    implied_times = implied_times_for_fps(mkv_start_ts, frame_indices, frame_rate)
+    _, offsets = nearest_offsets_seconds(implied_times, ft_times)
+
+    optimized_fps = optimize_fps(frame_rate, mkv_start_ts, frame_indices, ft_times)
+    optimized_implied_times = implied_times_for_fps(mkv_start_ts, frame_indices, optimized_fps)
+    _, optimized_offsets = nearest_offsets_seconds(optimized_implied_times, ft_times)
+
+    nominal_anchor_rmse_ms, nominal_anchor_max_abs_ms = anchor_error_metrics(offsets)
+    optimized_anchor_rmse_ms, optimized_anchor_max_abs_ms = anchor_error_metrics(
+        optimized_offsets
+    )
+    mean_ms, median_ms, min_ms, max_ms = summarize_offsets(optimized_offsets)
+
+    report_lines = [
+        f"=== Pair {pair_index}: FT={ft_path.name}  MKV={mkv_path.name} ===",
+        f"FT time entries in file: {len(ft_times)}",
+        f"Frame count: {frame_count}",
+        f"Optimized frame rate [fps]: {optimized_fps:.9f}",
+        "Offset summary @ optimized FPS (FT - implied):",
+        f"  mean [ms]:   {mean_ms:.6f}",
+        f"  median [ms]: {median_ms:.6f}",
+        f"  min [ms]:    {min_ms:.6f}",
+        f"  max [ms]:    {max_ms:.6f}",
+        "Optimization errors relative to first-frame offset:",
+        f"  nominal anchor RMSE [ms]:   {nominal_anchor_rmse_ms:.6f}",
+        f"  optimized anchor RMSE [ms]: {optimized_anchor_rmse_ms:.6f}",
+        f"  nominal max |delta| [ms]:   {nominal_anchor_max_abs_ms:.6f}",
+        f"  optimized max |delta| [ms]: {optimized_anchor_max_abs_ms:.6f}",
+    ]
+
+    batch_label = f"{ft_path.stem} -> {mkv_path.stem}"
+    return pair_index, frame_indices, optimized_offsets * 1000.0, batch_label, report_lines
 
 
 def main() -> int:
@@ -461,18 +582,24 @@ def main() -> int:
         help="Root directory containing FT files in YYYY/YYYYMMDD-XXX/YYYYMMDD-XXX_HH layout.",
     )
     parser.add_argument(
-        "--number-of-days",
+        "--number-of-ft-files",
         type=int,
         default=1,
-        help="Number of overlapping days to process when --mkvdir and --ftdir are provided.",
+        help="Number of matched FT files to process when --mkvdir and --ftdir are provided.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of worker processes for batch mode (0 = auto).",
     )
     args = parser.parse_args()
 
     rms_root = Path(args.rms_root).expanduser().resolve()
     plot_output = Path(args.plot_output).expanduser().resolve()
 
-    if args.number_of_days < 1:
-        print("--number-of-days must be >= 1")
+    if args.number_of_ft_files < 1:
+        print("--number-of-ft-files must be >= 1")
         return 1
 
     use_batch_mode = args.mkvdir is not None or args.ftdir is not None
@@ -518,6 +645,7 @@ def main() -> int:
             ft_times=ft_times,
             plot_output=plot_output,
             print_offsets_by_frame=True,
+            generate_plot=True,
         )
         return 0
 
@@ -541,37 +669,58 @@ def main() -> int:
         print(f"No matching FT files found under {ft_root}")
         return 1
 
-    mkv_by_day = group_mkv_by_day(mkv_meta)
-    ft_by_day = group_ft_by_day(ft_files)
-    overlap_days = sorted(set(mkv_by_day).intersection(ft_by_day))
-
-    if not overlap_days:
-        print("No overlapping MKV/FT days found between the provided directories")
+    matched_pairs = match_ft_to_mkv(ft_files, mkv_meta)
+    if not matched_pairs:
+        print("No overlapping FT/MKV files found between the provided directories")
         return 1
 
-    selected_days = overlap_days[: args.number_of_days]
-    print(f"Overlapping days found: {len(overlap_days)}")
-    print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
+    selected_pairs = matched_pairs[: args.number_of_ft_files]
+    print(f"Matched FT/MKV pairs found: {len(matched_pairs)}")
+    print(f"Processing first {len(selected_pairs)} matched FT file(s)")
 
-    for day_key in selected_days:
-        day_mkv_files = mkv_by_day[day_key]
-        day_ft_files = ft_by_day[day_key]
-        print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
+    batch_plot_series: list[tuple[np.ndarray, np.ndarray, str]] = []
 
-        day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
-        print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
-
-        for mkv_item in day_mkv_files:
-            per_file_plot = plot_output.with_name(f"{mkv_item.path.stem}_mkv_ft_time_offsets.png")
-            analyze_single_mkv(
-                mkv_path=mkv_item.path,
-                station_id=mkv_item.station_id,
-                mkv_start_utc=mkv_item.start_utc,
-                frame_rate=args.fps,
-                ft_times=day_ft_times,
-                plot_output=per_file_plot,
-                print_offsets_by_frame=False,
+    tasks: list[tuple[int, str, str, str, float, float, str]] = []
+    for index, (ft_item, mkv_item) in enumerate(selected_pairs, start=1):
+        tasks.append(
+            (
+                index,
+                str(ft_item.path),
+                str(mkv_item.path),
+                mkv_item.station_id,
+                mkv_item.start_utc.timestamp(),
+                args.fps,
+                str(rms_root),
             )
+        )
+
+    requested_workers = args.workers
+    auto_workers = os.cpu_count() or 1
+    max_workers = auto_workers if requested_workers == 0 else requested_workers
+    if max_workers < 1:
+        print("--workers must be >= 1 (or 0 for auto)")
+        return 1
+
+    print(f"Using {max_workers} worker process(es) for batch analysis")
+
+    if max_workers == 1:
+        results = [analyze_batch_pair_task(task) for task in tasks]
+    else:
+        results = []
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(analyze_batch_pair_task, task): task[0] for task in tasks}
+            for future in as_completed(future_map):
+                results.append(future.result())
+
+    results.sort(key=lambda item: item[0])
+    for _, frame_idx, optimized_offsets_ms, batch_label, report_lines in results:
+        print()
+        for line in report_lines:
+            print(line)
+        batch_plot_series.append((frame_idx, optimized_offsets_ms, batch_label))
+
+    plot_batch_offsets(batch_plot_series, plot_output)
+    print(f"\nSaved combined batch plot to: {plot_output}")
 
     return 0
 
