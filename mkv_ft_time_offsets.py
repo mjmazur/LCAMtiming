@@ -16,6 +16,9 @@ from pathlib import Path
 import numpy as np
 
 
+OPTIMIZED_CURVE_STD_THRESHOLD_MS = 40.0
+
+
 FT_FILENAME_PATTERN = re.compile(
     r"^FT_(?P<station>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.bin$"
 )
@@ -401,6 +404,10 @@ def plot_combined_optimized_offsets(
     plt.close()
 
 
+def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
+    return float(np.std(offsets_seconds) * 1000.0)
+
+
 def analyze_single_mkv(
     mkv_path: Path,
     station_id: str,
@@ -658,7 +665,16 @@ def main() -> int:
                     plot_output=None,
                     print_offsets_by_frame=False,
                 )
-                combined_curves.append((mkv_item.path.stem, optimized_offsets, optimized_fps))
+                curve_std_ms = optimized_curve_std_ms(optimized_offsets)
+                if curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                    print(
+                        f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms "
+                        f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
+                    )
+                else:
+                    combined_curves.append(
+                        (mkv_item.path.stem, optimized_offsets, optimized_fps)
+                    )
             continue
 
         print(f"Processing day {day_key} MKV files with multiprocessing workers={args.workers}")
@@ -680,11 +696,22 @@ def main() -> int:
             for future in as_completed(futures):
                 output_text, label, optimized_offsets, optimized_fps = future.result()
                 print(output_text, end="")
-                combined_curves.append((label, optimized_offsets, optimized_fps))
+                curve_std_ms = optimized_curve_std_ms(optimized_offsets)
+                if curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                    print(
+                        f"Discarding curve {label}: std={curve_std_ms:.3f} ms "
+                        f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
+                    )
+                else:
+                    combined_curves.append((label, optimized_offsets, optimized_fps))
 
     if combined_curves:
         plot_combined_optimized_offsets(combined_curves, plot_output)
         print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+    else:
+        print(
+            "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
+        )
 
     return 0
 
