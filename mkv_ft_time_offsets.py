@@ -660,7 +660,7 @@ def plot_ft_interval_histogram(ft_times: np.ndarray, output_path: Path) -> None:
     intervals_ms = np.diff(ft_times) * 1000.0
 
     plt.figure(figsize=(10, 5))
-    plt.hist(intervals_ms, bins=80)
+    plt.hist(intervals_ms, bins=200, range=(39.0, 41.0))
     plt.xlabel("Successive FT interval [ms]")
     plt.ylabel("Count")
     plt.title("Histogram of successive FT timestamp intervals")
