@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+# Analyze MKV implied frame timing against FT timestamps.
+#
+# Supports:
+# - Single-file/default mode (TestData by default)
+# - Batch mode across overlapping MKV/FT days with multiprocessing
+# - Multiple diagnostic plots and filtering of noisy curves
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +27,8 @@ import numpy as np
 OPTIMIZED_CURVE_STD_THRESHOLD_MS = 40.0
 
 
+# Per-worker cache for FT timestamps. This avoids repeatedly pickling/transferring
+# large FT arrays when using ProcessPoolExecutor.
 _WORKER_FT_TIMES: np.ndarray | None = None
 
 
@@ -38,6 +47,8 @@ MKV_FILENAME_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class FTFileMeta:
+    """Metadata extracted from an FT file path and filename timestamp."""
+
     path: Path
     station_id: str
     timestamp: datetime
@@ -45,12 +56,17 @@ class FTFileMeta:
 
 @dataclass(frozen=True)
 class MKVFileMeta:
+    """Metadata extracted from an MKV file path and filename start time."""
+
     path: Path
     station_id: str
     start_utc: datetime
 
 
 def parse_ft_filename(path: Path) -> FTFileMeta | None:
+    """Parse an FT filename into ``FTFileMeta`` if it matches known patterns."""
+
+    # Preferred FT naming pattern with station id.
     match = FT_FILENAME_PATTERN.match(path.name)
     if match:
         station_id = match.group("station")
@@ -58,6 +74,7 @@ def parse_ft_filename(path: Path) -> FTFileMeta | None:
         timestamp = datetime.strptime(timestamp_text, "%Y%m%d%H%M%S")
         return FTFileMeta(path=path, station_id=station_id, timestamp=timestamp)
 
+    # Backward-compatible FT naming pattern without station id.
     match_no_station = FT_FILENAME_NO_STATION_PATTERN.match(path.name)
     if not match_no_station:
         return None
@@ -68,6 +85,9 @@ def parse_ft_filename(path: Path) -> FTFileMeta | None:
 
 
 def discover_ft_files(search_root: Path) -> list[FTFileMeta]:
+    """Recursively discover FT files below ``search_root`` and sort by timestamp."""
+
+    # Recursively find FT files and sort by parsed start timestamp.
     found: list[FTFileMeta] = []
     for path in search_root.rglob("FT_*.bin"):
         if not path.is_file():
@@ -81,6 +101,9 @@ def discover_ft_files(search_root: Path) -> list[FTFileMeta]:
 
 
 def parse_mkv_start_from_filename(mkv_path: Path) -> tuple[str, datetime]:
+    """Parse station id and start datetime from a supported MKV filename."""
+
+    # Parse station and exact start timestamp from MKV filename.
     match = MKV_FILENAME_PATTERN.match(mkv_path.name)
     if not match:
         raise ValueError(
@@ -95,12 +118,17 @@ def parse_mkv_start_from_filename(mkv_path: Path) -> tuple[str, datetime]:
 
 
 def discover_mkv_files(search_root: Path) -> list[Path]:
+    """Return all MKV file paths below ``search_root`` sorted lexicographically."""
+
     mkvs = [path for path in search_root.rglob("*.mkv") if path.is_file()]
     mkvs.sort()
     return mkvs
 
 
 def discover_mkv_meta(search_root: Path) -> list[MKVFileMeta]:
+    """Collect MKV metadata for files that match the expected filename pattern."""
+
+    # Collect MKV files that match expected naming and store UTC start time.
     found: list[MKVFileMeta] = []
     for path in search_root.rglob("*.mkv"):
         if not path.is_file():
@@ -123,6 +151,9 @@ def discover_mkv_meta(search_root: Path) -> list[MKVFileMeta]:
 
 
 def group_ft_by_day(ft_files: list[FTFileMeta]) -> dict[str, list[FTFileMeta]]:
+    """Group FT files by calendar day key ``YYYYMMDD``."""
+
+    # Group FT files by YYYYMMDD derived from FT filename timestamp.
     grouped: dict[str, list[FTFileMeta]] = {}
     for item in ft_files:
         day_key = item.timestamp.strftime("%Y%m%d")
@@ -131,6 +162,9 @@ def group_ft_by_day(ft_files: list[FTFileMeta]) -> dict[str, list[FTFileMeta]]:
 
 
 def group_mkv_by_day(mkv_files: list[MKVFileMeta]) -> dict[str, list[MKVFileMeta]]:
+    """Group MKV files by calendar day key ``YYYYMMDD``."""
+
+    # Group MKV files by YYYYMMDD derived from MKV filename timestamp.
     grouped: dict[str, list[MKVFileMeta]] = {}
     for item in mkv_files:
         day_key = item.start_utc.strftime("%Y%m%d")
@@ -139,6 +173,9 @@ def group_mkv_by_day(mkv_files: list[MKVFileMeta]) -> dict[str, list[MKVFileMeta
 
 
 def run_ffprobe_frame_count(mkv_path: Path) -> int:
+    """Return frame count for MKV using ffprobe with duration-based fallback."""
+
+    # First try exact ffprobe frame counting.
     command = [
         "ffprobe",
         "-v",
@@ -164,6 +201,7 @@ def run_ffprobe_frame_count(mkv_path: Path) -> int:
             if parsed > 0:
                 return parsed
 
+    # Fallback for cases where nb_read_frames/nb_frames is unavailable.
     fallback_command = [
         "ffprobe",
         "-v",
@@ -197,6 +235,8 @@ def run_ffprobe_frame_count(mkv_path: Path) -> int:
 
 
 def import_ftfile_read(rms_root: Path):
+    """Import and return ``RMS.Formats.FTfile.read``, adding ``rms_root`` if needed."""
+
     try:
         from RMS.Formats import FTfile
 
@@ -209,6 +249,9 @@ def import_ftfile_read(rms_root: Path):
 
 
 def collect_ft_times_seconds(ft_files: list[FTFileMeta], rms_root: Path) -> np.ndarray:
+    """Read all FT timestamp entries and return one sorted numpy array (seconds)."""
+
+    # Read and merge all FT timestamps into one sorted vector for fast matching.
     read_ft = import_ftfile_read(rms_root)
 
     all_times: list[float] = []
@@ -227,6 +270,10 @@ def collect_ft_times_seconds(ft_files: list[FTFileMeta], rms_root: Path) -> np.n
 def nearest_offsets_seconds(
     implied_times: np.ndarray, ft_times: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Match each implied time to nearest FT time and return nearest times + offsets."""
+
+    # For each implied frame time, select the nearest FT timestamp.
+    # Uses searchsorted for O(N log M) nearest-neighbor matching.
     insert_positions = np.searchsorted(ft_times, implied_times)
 
     right_indices = np.clip(insert_positions, 0, len(ft_times) - 1)
@@ -242,6 +289,8 @@ def nearest_offsets_seconds(
 
 
 def implied_times_for_fps(start_timestamp: float, frame_indices: np.ndarray, fps: float) -> np.ndarray:
+    """Compute implied frame Unix times from start timestamp and frame rate."""
+
     return start_timestamp + (frame_indices / fps)
 
 
@@ -251,6 +300,9 @@ def offset_deviation_from_first_for_fps(
     frame_indices: np.ndarray,
     ft_times: np.ndarray,
 ) -> float:
+    """Objective value for FPS search: mean squared deviation from frame-0 offset."""
+
+    # Objective: keep curve flat around frame-0 offset.
     implied_times = implied_times_for_fps(start_timestamp, frame_indices, fps)
     _, offsets = nearest_offsets_seconds(implied_times, ft_times)
     first_offset = float(offsets[0])
@@ -263,6 +315,10 @@ def optimize_fps(
     frame_indices_all: np.ndarray,
     ft_times: np.ndarray,
 ) -> float:
+    """Optimize FPS with staged local search to flatten offsets around frame 0."""
+
+    # Coarse-to-fine local search around initial FPS.
+    # This is robust and simple while keeping compute bounded.
     if frame_indices_all.size == 0:
         raise ValueError("No frame indices provided for FPS optimization")
 
@@ -295,6 +351,8 @@ def optimize_fps(
 
 
 def summarize_offsets(offsets: np.ndarray) -> tuple[float, float, float, float]:
+    """Return mean, median, min, max offsets in milliseconds."""
+
     mean_ms = float(np.mean(offsets) * 1000.0)
     median_ms = float(np.median(offsets) * 1000.0)
     min_ms = float(np.min(offsets) * 1000.0)
@@ -303,6 +361,9 @@ def summarize_offsets(offsets: np.ndarray) -> tuple[float, float, float, float]:
 
 
 def print_offset_summary(title: str, offsets: np.ndarray) -> None:
+    """Print formatted summary statistics for an offset array."""
+
+    # Convenience summary in milliseconds.
     mean_ms, median_ms, min_ms, max_ms = summarize_offsets(offsets)
     print(f"\n{title}")
     print(f"  mean [ms]:   {mean_ms:.6f}")
@@ -312,6 +373,8 @@ def print_offset_summary(title: str, offsets: np.ndarray) -> None:
 
 
 def anchor_error_metrics(offsets: np.ndarray) -> tuple[float, float]:
+    """Return RMSE and max-abs deviation from first-frame offset (ms)."""
+
     first_offset = float(offsets[0])
     delta_from_first = offsets - first_offset
     rmse_ms = float(np.sqrt(np.mean(delta_from_first**2)) * 1000.0)
@@ -326,6 +389,8 @@ def plot_offsets(
     optimized_fps: float,
     output_path: Path,
 ) -> None:
+    """Plot raw and optimized offsets for a single MKV analysis."""
+
     import matplotlib.pyplot as plt
 
     frame_idx = np.arange(len(nominal_offsets_seconds))
@@ -369,6 +434,9 @@ def plot_combined_optimized_offsets(
     curves: list[tuple[str, np.ndarray, float]],
     output_path: Path,
 ) -> None:
+    """Plot accepted optimized curves together on one combined chart."""
+
+    # Plot all accepted optimized curves on one figure.
     import matplotlib.pyplot as plt
 
     if not curves:
@@ -408,6 +476,8 @@ def plot_combined_optimized_offsets(
 
 
 def sanitize_for_filename(text: str) -> str:
+    """Convert free text into a safe filename segment."""
+
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
     return sanitized.strip("_") or "curve"
 
@@ -420,6 +490,9 @@ def plot_single_optimized_curve(
     nominal_fps: float,
     output_path: Path,
 ) -> None:
+    """Plot raw and optimized offset curves for one sampled MKV result."""
+
+    # Plot raw and optimized versions of one selected curve.
     import matplotlib.pyplot as plt
 
     frame_idx = np.arange(len(offsets_seconds))
@@ -461,6 +534,9 @@ def plot_optimized_offset_summary_band(
     curves: list[tuple[str, np.ndarray, float]],
     output_path: Path,
 ) -> None:
+    """Plot per-curve mean offsets with min-max fill band."""
+
+    # For each curve, show mean offset and min-max band.
     import matplotlib.pyplot as plt
 
     labels = [label for label, _, _ in curves]
@@ -486,6 +562,10 @@ def plot_optimized_offset_histogram(
     curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
 ) -> None:
+    """Plot histogram of optimized offsets with bars colored by average Unix time."""
+
+    # Histogram of optimized offsets across all accepted curves.
+    # Bar colors encode average implied Unix time in each bin.
     import matplotlib.pyplot as plt
 
     all_offsets_ms = np.concatenate([offsets * 1000.0 for _, offsets, _, _ in curves])
@@ -497,6 +577,7 @@ def plot_optimized_offset_histogram(
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = np.diff(bin_edges)
 
+    # Vectorized bin assignment and per-bin average Unix-time computation.
     raw_bin_idx = np.searchsorted(bin_edges, all_offsets_ms, side="right") - 1
     valid_mask = (raw_bin_idx >= 0) & (raw_bin_idx < len(counts))
     finite_unix_mask = np.isfinite(all_unix_times)
@@ -550,6 +631,9 @@ def plot_optimized_fps_histogram(
     curves: list[tuple[str, np.ndarray, float]],
     output_path: Path,
 ) -> None:
+    """Plot histogram of optimized frame rates across accepted curves."""
+
+    # Distribution of optimized frame rates across accepted curves.
     import matplotlib.pyplot as plt
 
     fps_values = np.array([optimized_fps for _, _, optimized_fps in curves], dtype=float)
@@ -565,14 +649,21 @@ def plot_optimized_fps_histogram(
 
 
 def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
+    """Compute standard deviation of an offset curve in milliseconds."""
+
     return float(np.std(offsets_seconds) * 1000.0)
 
 
 def has_negative_offsets(offsets_seconds: np.ndarray) -> bool:
+    """Return True if any offset in the curve is negative."""
+
     return bool(np.any(offsets_seconds < 0.0))
 
 
 def try_create_plot(plot_name: str, create_plot_fn) -> bool:
+    """Execute plotting callback safely and report failures without raising."""
+
+    # Keep pipeline robust: one plot failure should not stop analysis.
     try:
         create_plot_fn()
         return True
@@ -590,6 +681,10 @@ def analyze_single_mkv(
     plot_output: Path | None,
     print_offsets_by_frame: bool,
 ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+    """Run full MKV-vs-FT timing analysis and return raw/optimized artifacts."""
+
+    # End-to-end analysis for one MKV against provided FT times.
+    # Returns raw offsets, optimized offsets, optimized FPS, and optimized implied Unix times.
     frame_count = run_ffprobe_frame_count(mkv_path)
     print(f"\nMKV file: {mkv_path}")
     print(f"Station in filename: {station_id}")
@@ -602,6 +697,7 @@ def analyze_single_mkv(
     implied_times = implied_times_for_fps(start_timestamp, frame_indices, frame_rate)
     _, offsets = nearest_offsets_seconds(implied_times, ft_times)
 
+    # Optimization explicitly uses all frames.
     optimization_frame_indices = frame_indices
     print(f"Frames used for FPS optimization: {optimization_frame_indices.size} (all frames)")
 
@@ -655,6 +751,10 @@ def run_batch_mkv_task(
     mkv_start_iso: str,
     frame_rate: float,
 ) -> tuple[str, str, np.ndarray, np.ndarray, float, np.ndarray]:
+    """Worker task for batch multiprocessing; returns logs and computed arrays."""
+
+    # Worker entry-point for multiprocessing batch mode.
+    # Captures print output so main process can emit clean sequential logs.
     mkv_path = Path(mkv_path_str)
     mkv_start_utc = datetime.fromisoformat(mkv_start_iso)
 
@@ -684,11 +784,19 @@ def run_batch_mkv_task(
 
 
 def _init_worker_ft_times(ft_times: np.ndarray) -> None:
+    """Process initializer to cache FT times once per worker."""
+
+    # Called once per worker process.
     global _WORKER_FT_TIMES
     _WORKER_FT_TIMES = ft_times
 
 
 def main() -> int:
+    """CLI entry point for single-mode and batch-mode timing analysis."""
+
+    # CLI entry-point.
+    # - default mode: one MKV + all FT under search root
+    # - batch mode: overlapping MKV/FT days, filtering, and summary plots
     parser = argparse.ArgumentParser(
         description=(
             "Compute frame-time offsets between an MKV timeline and nearest FT timestamps, "
@@ -755,12 +863,14 @@ def main() -> int:
         print("--workers must be >= 1")
         return 1
 
+    # Batch mode is enabled when either directory override is provided.
     use_batch_mode = args.mkvdir is not None or args.ftdir is not None
     if use_batch_mode and (args.mkvdir is None or args.ftdir is None):
         print("When using batch mode, both --mkvdir and --ftdir must be specified")
         return 1
 
     if not use_batch_mode:
+        # Single/default mode.
         search_root = Path(args.search_root).expanduser().resolve()
         if not search_root.is_dir():
             print(f"Search root is not a directory: {search_root}")
@@ -811,6 +921,7 @@ def main() -> int:
         print(f"FT directory is not valid: {ft_root}")
         return 1
 
+    # Batch mode: discover files and keep only overlapping days.
     mkv_meta = discover_mkv_meta(mkv_root)
     if not mkv_meta:
         print(f"No matching MKV files found under {mkv_root}")
@@ -833,6 +944,7 @@ def main() -> int:
     print(f"Overlapping days found: {len(overlap_days)}")
     print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
 
+    # Accepted curves after filtering; used for aggregate plots.
     combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, np.ndarray]] = []
 
     for day_key in selected_days:
@@ -843,6 +955,7 @@ def main() -> int:
         day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
         print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
 
+        # Process MKVs either serially or in parallel.
         if args.workers == 1:
             for mkv_item in day_mkv_files:
                 (
@@ -859,6 +972,7 @@ def main() -> int:
                     plot_output=None,
                     print_offsets_by_frame=False,
                 )
+                # Filter out curves with negative offsets or excessive spread.
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
                 if has_negative_offsets(optimized_offsets):
                     print(
@@ -909,6 +1023,7 @@ def main() -> int:
                     optimized_implied_times,
                 ) = future.result()
                 print(output_text, end="")
+                # Apply same filtering in multiprocessing path.
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
                 if has_negative_offsets(optimized_offsets):
                     print(
@@ -931,6 +1046,7 @@ def main() -> int:
                     )
 
     if combined_curves:
+        # Build derived curve representations for different aggregate plots.
         optimized_only_curves = [
             (label, optimized_offsets, optimized_fps)
             for label, _, optimized_offsets, optimized_fps, _ in combined_curves
