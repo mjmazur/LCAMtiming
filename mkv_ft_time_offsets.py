@@ -408,6 +408,10 @@ def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
     return float(np.std(offsets_seconds) * 1000.0)
 
 
+def has_negative_offsets(offsets_seconds: np.ndarray) -> bool:
+    return bool(np.any(offsets_seconds < 0.0))
+
+
 def analyze_single_mkv(
     mkv_path: Path,
     station_id: str,
@@ -666,7 +670,11 @@ def main() -> int:
                     print_offsets_by_frame=False,
                 )
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
-                if curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                if has_negative_offsets(optimized_offsets):
+                    print(
+                        f"Discarding curve {mkv_item.path.stem}: contains negative offsets"
+                    )
+                elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
                     print(
                         f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms "
                         f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
@@ -697,7 +705,11 @@ def main() -> int:
                 output_text, label, optimized_offsets, optimized_fps = future.result()
                 print(output_text, end="")
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
-                if curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                if has_negative_offsets(optimized_offsets):
+                    print(
+                        f"Discarding curve {label}: contains negative offsets"
+                    )
+                elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
                     print(
                         f"Discarding curve {label}: std={curve_std_ms:.3f} ms "
                         f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
