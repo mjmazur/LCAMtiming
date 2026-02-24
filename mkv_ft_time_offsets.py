@@ -32,8 +32,6 @@ MKV_FILENAME_PATTERN = re.compile(
     r"^(?P<station>.+?)_(?P<date>\d{8})_(?P<time>\d{6})_(?P<micro>\d{6})(?:_.+)?\.(?i:mkv)$"
 )
 
-DAY_NUMBER_DIR_PATTERN = re.compile(r"^\d{8}-(?P<daynum>\d{3})(?:_\d{2})?$")
-
 
 @dataclass(frozen=True)
 class FTFileMeta:
@@ -400,7 +398,7 @@ def plot_combined_optimized_offsets(
     plt.ylabel("Offset (FT - implied) [ms]")
     plt.title("Optimized MKV offset curves")
     plt.ylim(y_min, y_max)
-    plt.legend(loc="best", fontsize=8)
+    plt.legend(loc="center left", bbox_to_anchor=(0.5, -0.15),fontsize=8)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -409,14 +407,6 @@ def plot_combined_optimized_offsets(
 def sanitize_for_filename(text: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
     return sanitized.strip("_") or "curve"
-
-
-def extract_day_number_from_path(path: Path) -> float:
-    for part in reversed(path.parts):
-        match = DAY_NUMBER_DIR_PATTERN.match(part)
-        if match:
-            return float(int(match.group("daynum")))
-    return float("nan")
 
 
 def plot_single_optimized_curve(
@@ -490,21 +480,21 @@ def plot_optimized_offset_summary_band(
 
 
 def plot_optimized_offset_histogram(
-    curves: list[tuple[str, np.ndarray, float, float]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
 
     all_offsets_ms = np.concatenate([offsets * 1000.0 for _, offsets, _, _ in curves])
-    all_day_numbers = np.concatenate(
-        [np.full(len(offsets), day_number, dtype=float) for _, offsets, _, day_number in curves]
+    all_unix_times = np.concatenate(
+        [unix_times for _, _, _, unix_times in curves]
     )
 
     counts, bin_edges = np.histogram(all_offsets_ms, bins=60)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = np.diff(bin_edges)
 
-    bar_avg_days = np.full(len(counts), np.nan, dtype=float)
+    bar_avg_unix = np.full(len(counts), np.nan, dtype=float)
     for index in range(len(counts)):
         left = bin_edges[index]
         right = bin_edges[index + 1]
@@ -516,44 +506,44 @@ def plot_optimized_offset_histogram(
         if not np.any(mask):
             continue
 
-        day_values = all_day_numbers[mask]
-        finite_days = day_values[np.isfinite(day_values)]
-        if finite_days.size > 0:
-            bar_avg_days[index] = float(np.mean(finite_days))
+        unix_values = all_unix_times[mask]
+        finite_unix = unix_values[np.isfinite(unix_values)]
+        if finite_unix.size > 0:
+            bar_avg_unix[index] = float(np.mean(finite_unix))
 
-    plt.figure(figsize=(10, 5))
-    bars = plt.bar(bin_centers, counts, width=bin_widths, align="center")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(bin_centers, counts, width=bin_widths, align="center")
 
-    finite_bar_days = bar_avg_days[np.isfinite(bar_avg_days)]
-    if finite_bar_days.size > 0:
+    finite_bar_unix = bar_avg_unix[np.isfinite(bar_avg_unix)]
+    if finite_bar_unix.size > 0:
         cmap = plt.get_cmap("viridis")
-        day_min = float(np.min(finite_bar_days))
-        day_max = float(np.max(finite_bar_days))
-        if np.isclose(day_min, day_max):
-            norm = plt.Normalize(day_min - 0.5, day_max + 0.5)
+        unix_min = float(np.min(finite_bar_unix))
+        unix_max = float(np.max(finite_bar_unix))
+        if np.isclose(unix_min, unix_max):
+            norm = plt.Normalize(unix_min - 0.5, unix_max + 0.5)
         else:
-            norm = plt.Normalize(day_min, day_max)
+            norm = plt.Normalize(unix_min, unix_max)
 
-        for bar, avg_day in zip(bars, bar_avg_days):
-            if np.isfinite(avg_day):
-                bar.set_color(cmap(norm(avg_day)))
+        for bar, avg_unix in zip(bars, bar_avg_unix):
+            if np.isfinite(avg_unix):
+                bar.set_color(cmap(norm(avg_unix)))
             else:
                 bar.set_color("tab:gray")
 
         scalar_mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         scalar_mappable.set_array([])
-        colorbar = plt.colorbar(scalar_mappable)
-        colorbar.set_label("Average day number")
+        colorbar = fig.colorbar(scalar_mappable, ax=ax)
+        colorbar.set_label("Average Unix time")
     else:
         for bar in bars:
             bar.set_color("tab:blue")
 
-    plt.xlabel("Optimized offset (FT - implied) [ms]")
-    plt.ylabel("Count")
-    plt.title("Histogram of optimized offsets")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    ax.set_xlabel("Optimized offset (FT - implied) [ms]")
+    ax.set_ylabel("Count")
+    ax.set_title("Histogram of optimized offsets")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_optimized_fps_histogram(
@@ -599,7 +589,7 @@ def analyze_single_mkv(
     ft_times: np.ndarray,
     plot_output: Path | None,
     print_offsets_by_frame: bool,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     frame_count = run_ffprobe_frame_count(mkv_path)
     print(f"\nMKV file: {mkv_path}")
     print(f"Station in filename: {station_id}")
@@ -656,7 +646,7 @@ def analyze_single_mkv(
         if created:
             print(f"Saved offset plot to: {plot_output}")
 
-    return offsets, optimized_offsets, optimized_fps
+    return offsets, optimized_offsets, optimized_fps, optimized_implied_times
 
 
 def run_batch_mkv_task(
@@ -665,14 +655,13 @@ def run_batch_mkv_task(
     mkv_start_iso: str,
     frame_rate: float,
     ft_times: np.ndarray,
-    day_number: float,
-) -> tuple[str, str, np.ndarray, np.ndarray, float, float]:
+) -> tuple[str, str, np.ndarray, np.ndarray, float, np.ndarray]:
     mkv_path = Path(mkv_path_str)
     mkv_start_utc = datetime.fromisoformat(mkv_start_iso)
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
-        nominal_offsets, optimized_offsets, optimized_fps = analyze_single_mkv(
+        nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
@@ -688,7 +677,7 @@ def run_batch_mkv_task(
         nominal_offsets,
         optimized_offsets,
         optimized_fps,
-        day_number,
+        optimized_implied_times,
     )
 
 
@@ -837,7 +826,7 @@ def main() -> int:
     print(f"Overlapping days found: {len(overlap_days)}")
     print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
 
-    combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, float]] = []
+    combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, np.ndarray]] = []
 
     for day_key in selected_days:
         day_mkv_files = mkv_by_day[day_key]
@@ -849,7 +838,12 @@ def main() -> int:
 
         if args.workers == 1:
             for mkv_item in day_mkv_files:
-                nominal_offsets, optimized_offsets, optimized_fps = analyze_single_mkv(
+                (
+                    nominal_offsets,
+                    optimized_offsets,
+                    optimized_fps,
+                    optimized_implied_times,
+                ) = analyze_single_mkv(
                     mkv_path=mkv_item.path,
                     station_id=mkv_item.station_id,
                     mkv_start_utc=mkv_item.start_utc,
@@ -875,13 +869,13 @@ def main() -> int:
                             nominal_offsets,
                             optimized_offsets,
                             optimized_fps,
-                            extract_day_number_from_path(mkv_item.path),
+                            optimized_implied_times,
                         )
                     )
             continue
 
         print(f"Processing day {day_key} MKV files with multiprocessing workers={args.workers}")
-        task_args: list[tuple[str, str, str, float, np.ndarray, float]] = []
+        task_args: list[tuple[str, str, str, float, np.ndarray]] = []
         for mkv_item in day_mkv_files:
             task_args.append(
                 (
@@ -890,7 +884,6 @@ def main() -> int:
                     mkv_item.start_utc.isoformat(),
                     args.fps,
                     day_ft_times,
-                    extract_day_number_from_path(mkv_item.path),
                 )
             )
 
@@ -903,7 +896,7 @@ def main() -> int:
                     nominal_offsets,
                     optimized_offsets,
                     optimized_fps,
-                    day_number,
+                    optimized_implied_times,
                 ) = future.result()
                 print(output_text, end="")
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
@@ -918,7 +911,13 @@ def main() -> int:
                     )
                 else:
                     combined_curves.append(
-                        (label, nominal_offsets, optimized_offsets, optimized_fps, day_number)
+                        (
+                            label,
+                            nominal_offsets,
+                            optimized_offsets,
+                            optimized_fps,
+                            optimized_implied_times,
+                        )
                     )
 
     if combined_curves:
@@ -926,9 +925,9 @@ def main() -> int:
             (label, optimized_offsets, optimized_fps)
             for label, _, optimized_offsets, optimized_fps, _ in combined_curves
         ]
-        optimized_curves_with_day = [
-            (label, optimized_offsets, optimized_fps, day_number)
-            for label, _, optimized_offsets, optimized_fps, day_number in combined_curves
+        optimized_curves_with_time = [
+            (label, optimized_offsets, optimized_fps, optimized_implied_times)
+            for label, _, optimized_offsets, optimized_fps, optimized_implied_times in combined_curves
         ]
         created = try_create_plot(
             f"combined optimized-offset plot ({plot_output})",
@@ -975,7 +974,7 @@ def main() -> int:
         )
         created = try_create_plot(
             f"optimized offset histogram ({offset_hist_plot})",
-            lambda: plot_optimized_offset_histogram(optimized_curves_with_day, offset_hist_plot),
+            lambda: plot_optimized_offset_histogram(optimized_curves_with_time, offset_hist_plot),
         )
         if created:
             print(f"Saved optimized offset histogram to: {offset_hist_plot}")
