@@ -648,6 +648,27 @@ def plot_optimized_fps_histogram(
     plt.close()
 
 
+def plot_ft_interval_histogram(ft_times: np.ndarray, output_path: Path) -> None:
+    """Plot histogram of successive FT timestamp intervals in milliseconds."""
+
+    import matplotlib.pyplot as plt
+
+    if ft_times.size < 2:
+        raise ValueError("Need at least two FT timestamps to compute intervals")
+
+    # FT timestamps are sorted; intervals are between successive entries.
+    intervals_ms = np.diff(ft_times) * 1000.0
+
+    plt.figure(figsize=(10, 5))
+    plt.hist(intervals_ms, bins=80)
+    plt.xlabel("Successive FT interval [ms]")
+    plt.ylabel("Count")
+    plt.title("Histogram of successive FT timestamp intervals")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
     """Compute standard deviation of an offset curve in milliseconds."""
 
@@ -903,6 +924,16 @@ def main() -> int:
         ft_times = collect_ft_times_seconds(ft_files, rms_root)
         print(f"Total FT time entries: {len(ft_times)}")
 
+        ft_interval_plot = plot_output.with_name(
+            f"{plot_output.stem}_ft_interval_hist.png"
+        )
+        created = try_create_plot(
+            f"FT interval histogram ({ft_interval_plot})",
+            lambda: plot_ft_interval_histogram(ft_times, ft_interval_plot),
+        )
+        if created:
+            print(f"Saved FT interval histogram to: {ft_interval_plot}")
+
         analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
@@ -957,6 +988,16 @@ def main() -> int:
 
         day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
         print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
+
+        day_ft_interval_plot = plot_output.with_name(
+            f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
+        )
+        created = try_create_plot(
+            f"FT interval histogram ({day_ft_interval_plot})",
+            lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
+        )
+        if created:
+            print(f"Saved FT interval histogram to: {day_ft_interval_plot}")
 
         # Process MKVs either serially or in parallel.
         if args.workers == 1:
