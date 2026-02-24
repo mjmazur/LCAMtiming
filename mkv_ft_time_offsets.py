@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import random
 import re
 import subprocess
 import sys
@@ -404,6 +405,62 @@ def plot_combined_optimized_offsets(
     plt.close()
 
 
+def sanitize_for_filename(text: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    return sanitized.strip("_") or "curve"
+
+
+def plot_single_optimized_curve(
+    label: str,
+    offsets_seconds: np.ndarray,
+    optimized_fps: float,
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    frame_idx = np.arange(len(offsets_seconds))
+    offsets_ms = offsets_seconds * 1000.0
+    min_ms = float(np.min(offsets_ms))
+    max_ms = float(np.max(offsets_ms))
+
+    if np.isclose(min_ms, max_ms):
+        pad_ms = max(1.0, abs(min_ms) * 0.05)
+    else:
+        pad_ms = (max_ms - min_ms) * 0.05
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(frame_idx, offsets_ms, linewidth=1.2, label=f"opt FPS={optimized_fps:.6f}")
+    plt.xlabel("Frame index")
+    plt.ylabel("Offset (FT - implied) [ms]")
+    plt.title(f"Optimized offset curve: {label}")
+    plt.ylim(min_ms - pad_ms, max_ms + pad_ms)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def plot_optimized_frame_rates(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    labels = [label for label, _, _ in curves]
+    fps_values = [optimized_fps for _, _, optimized_fps in curves]
+    indices = np.arange(len(curves))
+
+    plt.figure(figsize=(max(10, len(curves) * 0.5), 5))
+    plt.plot(indices, fps_values, marker="o", linewidth=1.0)
+    plt.xlabel("Curve index")
+    plt.ylabel("Optimized FPS")
+    plt.title("Optimized frame rates")
+    plt.xticks(indices, labels, rotation=45, ha="right", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
     return float(np.std(offsets_seconds) * 1000.0)
 
@@ -720,6 +777,20 @@ def main() -> int:
     if combined_curves:
         plot_combined_optimized_offsets(combined_curves, plot_output)
         print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+
+        sample_count = min(5, len(combined_curves))
+        sampled_curves = random.sample(combined_curves, k=sample_count)
+        print(f"Creating {sample_count} randomly selected single-curve optimized plots")
+        for index, (label, offsets, optimized_fps) in enumerate(sampled_curves, start=1):
+            sample_plot = plot_output.with_name(
+                f"{plot_output.stem}_sample_{index}_{sanitize_for_filename(label)}.png"
+            )
+            plot_single_optimized_curve(label, offsets, optimized_fps, sample_plot)
+            print(f"Saved single optimized curve plot to: {sample_plot}")
+
+        fps_plot = plot_output.with_name(f"{plot_output.stem}_optimized_fps.png")
+        plot_optimized_frame_rates(combined_curves, fps_plot)
+        print(f"Saved optimized frame-rate plot to: {fps_plot}")
     else:
         print(
             "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
