@@ -499,6 +499,41 @@ def plot_combined_optimized_offsets(
     plt.close()
 
 
+def plot_optimized_offset_density(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    """Plot 2D density representation of optimized offsets across all curves."""
+
+    import matplotlib.pyplot as plt
+
+    if not curves:
+        raise ValueError("No optimized curves available to plot")
+
+    all_frame_indices = []
+    all_offsets_ms = []
+
+    for _, offsets, _ in curves:
+        indices = np.arange(len(offsets))
+        offsets_ms = offsets * 1000.0
+        all_frame_indices.append(indices)
+        all_offsets_ms.append(offsets_ms)
+
+    x = np.concatenate(all_frame_indices)
+    y = np.concatenate(all_offsets_ms)
+
+    plt.figure(figsize=(12, 6))
+    # Use hist2d for a clear density representation.
+    plt.hist2d(x, y, bins=[100, 100], cmap="viridis")
+    plt.colorbar(label="Density (counts)")
+    plt.xlabel("Frame index")
+    plt.ylabel("Offset (FT - implied) [ms]")
+    plt.title("2D Density of optimized MKV offsets")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def sanitize_for_filename(text: str) -> str:
     """Convert free text into a safe filename segment."""
 
@@ -1104,6 +1139,16 @@ def main() -> int:
         )
         if created:
             print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+
+        density_plot = plot_output.with_name(
+            f"{plot_output.stem}_optimized_offset_density_2d.png"
+        )
+        created = try_create_plot(
+            f"2D density offset plot ({density_plot})",
+            lambda: plot_optimized_offset_density(optimized_only_curves, density_plot),
+        )
+        if created:
+            print(f"Saved 2D density offset plot to: {density_plot}")
 
         sample_count = min(5, len(combined_curves))
         sampled_curves = random.sample(combined_curves, k=sample_count)
