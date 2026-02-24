@@ -1,0 +1,12 @@
+==========================================================================
+RMS star extractor
+Cal time = FF header time plus 255/(2*framerate_Hz) seconds
+      Y       X IntensSum Ampltd  FWHM  BgLvl   SNR NSatPx
+==========================================================================
+FF folder = /home/mmazur/source/Projects/SatelliteQC/FTtest/
+Cam #   = CAWEA2
+Nrows   = 1080
+Ncols   = 1920
+Nframes = 256
+Nstars  = -1
+##########################################################################
