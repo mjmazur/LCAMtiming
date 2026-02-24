@@ -461,6 +461,31 @@ def plot_optimized_frame_rates(
     plt.close()
 
 
+def plot_optimized_offset_summary_band(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    labels = [label for label, _, _ in curves]
+    mean_ms = np.array([np.mean(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
+    min_ms = np.array([np.min(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
+    max_ms = np.array([np.max(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
+    indices = np.arange(len(curves))
+
+    plt.figure(figsize=(max(10, len(curves) * 0.5), 5))
+    plt.fill_between(indices, min_ms, max_ms, alpha=0.25, label="Min-Max range")
+    plt.plot(indices, mean_ms, marker="o", linewidth=1.2, label="Mean offset")
+    plt.xlabel("Curve index")
+    plt.ylabel("Offset (FT - implied) [ms]")
+    plt.title("Optimized offset summary (mean with min-max band)")
+    plt.xticks(indices, labels, rotation=45, ha="right", fontsize=8)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
     return float(np.std(offsets_seconds) * 1000.0)
 
@@ -791,6 +816,12 @@ def main() -> int:
         fps_plot = plot_output.with_name(f"{plot_output.stem}_optimized_fps.png")
         plot_optimized_frame_rates(combined_curves, fps_plot)
         print(f"Saved optimized frame-rate plot to: {fps_plot}")
+
+        summary_band_plot = plot_output.with_name(
+            f"{plot_output.stem}_optimized_offset_summary_band.png"
+        )
+        plot_optimized_offset_summary_band(combined_curves, summary_band_plot)
+        print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
     else:
         print(
             "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
