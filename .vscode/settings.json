@@ -1,0 +1,5 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/home/mmazur/source/Projects/LCAMtiming/.venv/bin/python": true
+    }
+}

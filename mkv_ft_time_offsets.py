@@ -854,7 +854,10 @@ def main() -> int:
     args = parser.parse_args()
 
     rms_root = Path(args.rms_root).expanduser().resolve()
-    plot_output = Path(args.plot_output).expanduser().resolve()
+    requested_plot_output = Path(args.plot_output).expanduser().resolve()
+    figures_dir = requested_plot_output.parent / "Figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    plot_output = figures_dir / requested_plot_output.name
 
     if args.number_of_days < 1:
         print("--number-of-days must be >= 1")
