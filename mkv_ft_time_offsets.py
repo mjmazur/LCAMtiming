@@ -27,9 +27,7 @@ import numpy as np
 OPTIMIZED_CURVE_STD_THRESHOLD_MS = 40.0
 
 
-# Per-worker cache for FT timestamps. This avoids repeatedly pickling/transferring
-# large FT arrays when using ProcessPoolExecutor.
-_WORKER_FT_TIMES: np.ndarray | None = None
+# Removed per-worker cache _WORKER_FT_TIMES. FT times are now passed directly to tasks.
 
 
 FT_FILENAME_PATTERN = re.compile(
@@ -175,8 +173,28 @@ def group_mkv_by_day(mkv_files: list[MKVFileMeta]) -> dict[str, list[MKVFileMeta
 def run_ffprobe_frame_count(mkv_path: Path) -> int:
     """Return frame count for MKV using ffprobe with duration-based fallback."""
 
-    # First try exact ffprobe frame counting.
+    # Try quick ffprobe first (no -count_frames).
     command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_frames",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(mkv_path),
+    ]
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        val = result.stdout.strip()
+        if val.isdigit() and int(val) > 0:
+            return int(val)
+
+    # If nb_frames is missing or 0, try -count_frames which is slower but more reliable.
+    command_deep = [
         "ffprobe",
         "-v",
         "error",
@@ -184,22 +202,17 @@ def run_ffprobe_frame_count(mkv_path: Path) -> int:
         "v:0",
         "-count_frames",
         "-show_entries",
-        "stream=nb_read_frames,nb_frames",
+        "stream=nb_read_frames",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         str(mkv_path),
     ]
 
-    result = subprocess.run(command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed for {mkv_path}: {result.stderr.strip()}")
-
-    for line in result.stdout.splitlines():
-        value = line.strip()
-        if value.isdigit():
-            parsed = int(value)
-            if parsed > 0:
-                return parsed
+    result = subprocess.run(command_deep, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        val = result.stdout.strip()
+        if val.isdigit() and int(val) > 0:
+            return int(val)
 
     # Fallback for cases where nb_read_frames/nb_frames is unavailable.
     fallback_command = [
@@ -209,7 +222,7 @@ def run_ffprobe_frame_count(mkv_path: Path) -> int:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=duration",
+        "stream=duration,r_frame_rate",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         str(mkv_path),
@@ -217,21 +230,21 @@ def run_ffprobe_frame_count(mkv_path: Path) -> int:
     fallback_result = subprocess.run(
         fallback_command, check=False, capture_output=True, text=True
     )
-    if fallback_result.returncode != 0:
-        raise RuntimeError(
-            f"ffprobe duration fallback failed for {mkv_path}: {fallback_result.stderr.strip()}"
-        )
+    if fallback_result.returncode == 0:
+        lines = fallback_result.stdout.strip().splitlines()
+        if len(lines) >= 1:
+            duration = float(lines[0])
+            fps = 25.0
+            if len(lines) >= 2 and "/" in lines[1]:
+                num, den = lines[1].split("/")
+                if float(den) > 0:
+                    fps = float(num) / float(den)
+            
+            frames = int(round(duration * fps))
+            if frames > 0:
+                return frames
 
-    duration_text = fallback_result.stdout.strip()
-    if not duration_text:
-        raise RuntimeError(f"Could not determine frame count for {mkv_path}")
-
-    duration = float(duration_text)
-    fallback_fps = 25.0
-    frames = int(round(duration * fallback_fps))
-    if frames <= 0:
-        raise RuntimeError(f"Duration-based frame count invalid for {mkv_path}")
-    return frames
+    raise RuntimeError(f"Could not determine frame count for {mkv_path}")
 
 
 def import_ftfile_read(rms_root: Path):
@@ -295,18 +308,35 @@ def implied_times_for_fps(start_timestamp: float, frame_indices: np.ndarray, fps
 
 
 def offset_deviation_from_first_for_fps(
-    fps: float,
+    fps_array: np.ndarray,
     start_timestamp: float,
     frame_indices: np.ndarray,
     ft_times: np.ndarray,
-) -> float:
-    """Objective value for FPS search: mean squared deviation from frame-0 offset."""
+) -> np.ndarray:
+    """Objective values for FPS search: mean squared deviation from frame-0 offset."""
 
-    # Objective: keep curve flat around frame-0 offset.
-    implied_times = implied_times_for_fps(start_timestamp, frame_indices, fps)
-    _, offsets = nearest_offsets_seconds(implied_times, ft_times)
-    first_offset = float(offsets[0])
-    return float(np.mean((offsets - first_offset) ** 2))
+    # fps_array: (N,)
+    # frame_indices: (M,)
+    # implied_times: (N, M)
+    implied_times = start_timestamp + (frame_indices[np.newaxis, :] / fps_array[:, np.newaxis])
+    
+    # ft_times is (K,)
+    # searchsorted on (N, M)
+    insert_positions = np.searchsorted(ft_times, implied_times)
+
+    right_indices = np.clip(insert_positions, 0, len(ft_times) - 1)
+    left_indices = np.clip(insert_positions - 1, 0, len(ft_times) - 1)
+
+    left_values = ft_times[left_indices]
+    right_values = ft_times[right_indices]
+
+    choose_right = np.abs(right_values - implied_times) < np.abs(left_values - implied_times)
+    nearest_values = np.where(choose_right, right_values, left_values)
+    offsets = nearest_values - implied_times
+    
+    first_offsets = offsets[:, 0][:, np.newaxis]
+    delta = offsets - first_offsets
+    return np.mean(delta**2, axis=1)
 
 
 def optimize_fps(
@@ -317,16 +347,11 @@ def optimize_fps(
 ) -> float:
     """Optimize FPS with staged local search to flatten offsets around frame 0."""
 
-    # Coarse-to-fine local search around initial FPS.
-    # This is robust and simple while keeping compute bounded.
     if frame_indices_all.size == 0:
         raise ValueError("No frame indices provided for FPS optimization")
 
     best_fps = initial_fps
-    best_error = offset_deviation_from_first_for_fps(
-        best_fps, start_timestamp, frame_indices_all, ft_times
-    )
-
+    
     search_stages = [
         (0.5, 201),
         (0.05, 201),
@@ -337,15 +362,14 @@ def optimize_fps(
     for half_width, steps in search_stages:
         min_fps = max(0.1, best_fps - half_width)
         max_fps = best_fps + half_width
-        candidates = np.linspace(min_fps, max_fps, num=steps)
-
-        for candidate_fps in candidates:
-            error = offset_deviation_from_first_for_fps(
-                float(candidate_fps), start_timestamp, frame_indices_all, ft_times
-            )
-            if error < best_error:
-                best_error = error
-                best_fps = float(candidate_fps)
+        candidates = np.linspace(min_fps, max_fps, num=steps, dtype=np.float64)
+        
+        errors = offset_deviation_from_first_for_fps(
+            candidates, start_timestamp, frame_indices_all, ft_times
+        )
+        
+        best_idx = np.argmin(errors)
+        best_fps = float(candidates[best_idx])
 
     return best_fps
 
@@ -771,6 +795,7 @@ def run_batch_mkv_task(
     station_id: str,
     mkv_start_iso: str,
     frame_rate: float,
+    ft_times: np.ndarray,
 ) -> tuple[str, str, np.ndarray, np.ndarray, float, np.ndarray]:
     """Worker task for batch multiprocessing; returns logs and computed arrays."""
 
@@ -779,9 +804,6 @@ def run_batch_mkv_task(
     mkv_path = Path(mkv_path_str)
     mkv_start_utc = datetime.fromisoformat(mkv_start_iso)
 
-    if _WORKER_FT_TIMES is None:
-        raise RuntimeError("Worker FT times not initialized")
-
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
         nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times = analyze_single_mkv(
@@ -789,7 +811,7 @@ def run_batch_mkv_task(
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
             frame_rate=frame_rate,
-            ft_times=_WORKER_FT_TIMES,
+            ft_times=ft_times,
             plot_output=None,
             print_offsets_by_frame=False,
         )
@@ -803,13 +825,6 @@ def run_batch_mkv_task(
         optimized_implied_times,
     )
 
-
-def _init_worker_ft_times(ft_times: np.ndarray) -> None:
-    """Process initializer to cache FT times once per worker."""
-
-    # Called once per worker process.
-    global _WORKER_FT_TIMES
-    _WORKER_FT_TIMES = ft_times
 
 
 def main() -> int:
@@ -981,26 +996,24 @@ def main() -> int:
     # Accepted curves after filtering; used for aggregate plots.
     combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, np.ndarray]] = []
 
-    for day_key in selected_days:
-        day_mkv_files = mkv_by_day[day_key]
-        day_ft_files = ft_by_day[day_key]
-        print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
+    # Process MKVs either serially or in parallel.
+    if args.workers == 1:
+        for day_key in selected_days:
+            day_mkv_files = mkv_by_day[day_key]
+            day_ft_files = ft_by_day[day_key]
+            print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
 
-        day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
-        print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
+            day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
+            print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
 
-        day_ft_interval_plot = plot_output.with_name(
-            f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
-        )
-        created = try_create_plot(
-            f"FT interval histogram ({day_ft_interval_plot})",
-            lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
-        )
-        if created:
-            print(f"Saved FT interval histogram to: {day_ft_interval_plot}")
+            day_ft_interval_plot = plot_output.with_name(
+                f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
+            )
+            try_create_plot(
+                f"FT interval histogram ({day_ft_interval_plot})",
+                lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
+            )
 
-        # Process MKVs either serially or in parallel.
-        if args.workers == 1:
             for mkv_item in day_mkv_files:
                 (
                     nominal_offsets,
@@ -1016,78 +1029,64 @@ def main() -> int:
                     plot_output=None,
                     print_offsets_by_frame=False,
                 )
-                # Filter out curves with negative offsets or excessive spread.
+                
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
                 if has_negative_offsets(optimized_offsets):
-                    print(
-                        f"Discarding curve {mkv_item.path.stem}: contains negative offsets"
-                    )
+                    print(f"Discarding curve {mkv_item.path.stem}: contains negative offsets")
                 elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
-                    print(
-                        f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms "
-                        f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
-                    )
+                    print(f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
                 else:
-                    combined_curves.append(
-                        (
-                            mkv_item.path.stem,
-                            nominal_offsets,
-                            optimized_offsets,
-                            optimized_fps,
-                            optimized_implied_times,
-                        )
-                    )
-            continue
+                    combined_curves.append((mkv_item.path.stem, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+    else:
+        print(f"Processing MKV files with multiprocessing workers={args.workers}")
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            for day_key in selected_days:
+                day_mkv_files = mkv_by_day[day_key]
+                day_ft_files = ft_by_day[day_key]
+                print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
 
-        print(f"Processing day {day_key} MKV files with multiprocessing workers={args.workers}")
-        task_args: list[tuple[str, str, str, float]] = []
-        for mkv_item in day_mkv_files:
-            task_args.append(
-                (
-                    str(mkv_item.path),
-                    mkv_item.station_id,
-                    mkv_item.start_utc.isoformat(),
-                    args.fps,
+                day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
+                print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
+
+                day_ft_interval_plot = plot_output.with_name(
+                    f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
                 )
-            )
+                try_create_plot(
+                    f"FT interval histogram ({day_ft_interval_plot})",
+                    lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
+                )
 
-        with ProcessPoolExecutor(
-            max_workers=args.workers,
-            initializer=_init_worker_ft_times,
-            initargs=(day_ft_times,),
-        ) as executor:
-            futures = [executor.submit(run_batch_mkv_task, *task) for task in task_args]
-            for future in as_completed(futures):
-                (
-                    output_text,
-                    label,
-                    nominal_offsets,
-                    optimized_offsets,
-                    optimized_fps,
-                    optimized_implied_times,
-                ) = future.result()
-                print(output_text, end="")
-                # Apply same filtering in multiprocessing path.
-                curve_std_ms = optimized_curve_std_ms(optimized_offsets)
-                if has_negative_offsets(optimized_offsets):
-                    print(
-                        f"Discarding curve {label}: contains negative offsets"
-                    )
-                elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
-                    print(
-                        f"Discarding curve {label}: std={curve_std_ms:.3f} ms "
-                        f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
-                    )
-                else:
-                    combined_curves.append(
-                        (
-                            label,
-                            nominal_offsets,
-                            optimized_offsets,
-                            optimized_fps,
-                            optimized_implied_times,
+                futures = []
+                for mkv_item in day_mkv_files:
+                    futures.append(
+                        executor.submit(
+                            run_batch_mkv_task,
+                            str(mkv_item.path),
+                            mkv_item.station_id,
+                            mkv_item.start_utc.isoformat(),
+                            args.fps,
+                            day_ft_times,
                         )
                     )
+
+                for future in as_completed(futures):
+                    (
+                        output_text,
+                        label,
+                        nominal_offsets,
+                        optimized_offsets,
+                        optimized_fps,
+                        optimized_implied_times,
+                    ) = future.result()
+                    print(output_text, end="")
+                    
+                    curve_std_ms = optimized_curve_std_ms(optimized_offsets)
+                    if has_negative_offsets(optimized_offsets):
+                        print(f"Discarding curve {label}: contains negative offsets")
+                    elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                        print(f"Discarding curve {label}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
+                    else:
+                        combined_curves.append((label, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
 
     if combined_curves:
         # Build derived curve representations for different aggregate plots.
