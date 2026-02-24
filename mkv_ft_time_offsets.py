@@ -500,6 +500,42 @@ def plot_optimized_offset_summary_band(
     plt.close()
 
 
+def plot_optimized_offset_histogram(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    all_offsets_ms = np.concatenate([offsets * 1000.0 for _, offsets, _ in curves])
+
+    plt.figure(figsize=(10, 5))
+    plt.hist(all_offsets_ms, bins=60)
+    plt.xlabel("Optimized offset (FT - implied) [ms]")
+    plt.ylabel("Count")
+    plt.title("Histogram of optimized offsets")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def plot_optimized_fps_histogram(
+    curves: list[tuple[str, np.ndarray, float]],
+    output_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fps_values = np.array([optimized_fps for _, _, optimized_fps in curves], dtype=float)
+
+    plt.figure(figsize=(10, 5))
+    plt.hist(fps_values, bins=min(30, max(5, len(fps_values))))
+    plt.xlabel("Optimized FPS")
+    plt.ylabel("Count")
+    plt.title("Histogram of optimized frame rates")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def optimized_curve_std_ms(offsets_seconds: np.ndarray) -> float:
     return float(np.std(offsets_seconds) * 1000.0)
 
@@ -868,6 +904,18 @@ def main() -> int:
         )
         plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot)
         print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
+
+        offset_hist_plot = plot_output.with_name(
+            f"{plot_output.stem}_optimized_offset_hist.png"
+        )
+        plot_optimized_offset_histogram(optimized_only_curves, offset_hist_plot)
+        print(f"Saved optimized offset histogram to: {offset_hist_plot}")
+
+        fps_hist_plot = plot_output.with_name(
+            f"{plot_output.stem}_optimized_fps_hist.png"
+        )
+        plot_optimized_fps_histogram(optimized_only_curves, fps_hist_plot)
+        print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
     else:
         print(
             "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
