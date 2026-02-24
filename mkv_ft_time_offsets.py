@@ -454,27 +454,6 @@ def plot_single_optimized_curve(
     plt.close()
 
 
-def plot_optimized_frame_rates(
-    curves: list[tuple[str, np.ndarray, float]],
-    output_path: Path,
-) -> None:
-    import matplotlib.pyplot as plt
-
-    labels = [label for label, _, _ in curves]
-    fps_values = [optimized_fps for _, _, optimized_fps in curves]
-    indices = np.arange(len(curves))
-
-    plt.figure(figsize=(max(10, len(curves) * 0.5), 5))
-    plt.plot(indices, fps_values, marker="o", linewidth=1.0)
-    plt.xlabel("Curve index")
-    plt.ylabel("Optimized FPS")
-    plt.title("Optimized frame rates")
-    plt.xticks(indices, labels, rotation=45, ha="right", fontsize=8)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-
-
 def plot_optimized_offset_summary_band(
     curves: list[tuple[str, np.ndarray, float]],
     output_path: Path,
@@ -915,14 +894,6 @@ def main() -> int:
             )
             if created:
                 print(f"Saved single optimized curve plot to: {sample_plot}")
-
-        fps_plot = plot_output.with_name(f"{plot_output.stem}_optimized_fps.png")
-        created = try_create_plot(
-            f"optimized frame-rate plot ({fps_plot})",
-            lambda: plot_optimized_frame_rates(optimized_only_curves, fps_plot),
-        )
-        if created:
-            print(f"Saved optimized frame-rate plot to: {fps_plot}")
 
         summary_band_plot = plot_output.with_name(
             f"{plot_output.stem}_optimized_offset_summary_band.png"
