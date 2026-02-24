@@ -357,7 +357,6 @@ def plot_offsets(
     plt.ylabel("Offset (FT - implied) [ms]")
     plt.title("MKV implied frame time vs nearest FT time")
     plt.ylim(y_min, y_max)
-    plt.legend(loc="best")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -412,16 +411,20 @@ def sanitize_for_filename(text: str) -> str:
 
 def plot_single_optimized_curve(
     label: str,
+    nominal_offsets_seconds: np.ndarray,
     offsets_seconds: np.ndarray,
     optimized_fps: float,
+    nominal_fps: float,
     output_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
 
     frame_idx = np.arange(len(offsets_seconds))
-    offsets_ms = offsets_seconds * 1000.0
-    min_ms = float(np.min(offsets_ms))
-    max_ms = float(np.max(offsets_ms))
+    nominal_offsets_ms = nominal_offsets_seconds * 1000.0
+    optimized_offsets_ms = offsets_seconds * 1000.0
+    all_offsets_ms = np.concatenate((nominal_offsets_ms, optimized_offsets_ms))
+    min_ms = float(np.min(all_offsets_ms))
+    max_ms = float(np.max(all_offsets_ms))
 
     if np.isclose(min_ms, max_ms):
         pad_ms = max(1.0, abs(min_ms) * 0.05)
@@ -429,7 +432,18 @@ def plot_single_optimized_curve(
         pad_ms = (max_ms - min_ms) * 0.05
 
     plt.figure(figsize=(10, 5))
-    plt.plot(frame_idx, offsets_ms, linewidth=1.2, label=f"opt FPS={optimized_fps:.6f}")
+    plt.plot(
+        frame_idx,
+        nominal_offsets_ms,
+        linewidth=1.0,
+        label=f"raw @ FPS={nominal_fps:.6f}",
+    )
+    plt.plot(
+        frame_idx,
+        optimized_offsets_ms,
+        linewidth=1.2,
+        label=f"optimized @ FPS={optimized_fps:.6f}",
+    )
     plt.xlabel("Frame index")
     plt.ylabel("Offset (FT - implied) [ms]")
     plt.title(f"Optimized offset curve: {label}")
@@ -502,7 +516,7 @@ def analyze_single_mkv(
     ft_times: np.ndarray,
     plot_output: Path | None,
     print_offsets_by_frame: bool,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     frame_count = run_ffprobe_frame_count(mkv_path)
     print(f"\nMKV file: {mkv_path}")
     print(f"Station in filename: {station_id}")
@@ -555,7 +569,7 @@ def analyze_single_mkv(
         plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output)
         print(f"Saved offset plot to: {plot_output}")
 
-    return optimized_offsets, optimized_fps
+    return offsets, optimized_offsets, optimized_fps
 
 
 def run_batch_mkv_task(
@@ -572,7 +586,7 @@ def run_batch_mkv_task(
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
-        optimized_offsets, optimized_fps = analyze_single_mkv(
+        nominal_offsets, optimized_offsets, optimized_fps = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
@@ -582,7 +596,13 @@ def run_batch_mkv_task(
             print_offsets_by_frame=False,
         )
 
-    return output_buffer.getvalue(), mkv_path.stem, optimized_offsets, optimized_fps
+    return (
+        output_buffer.getvalue(),
+        mkv_path.stem,
+        nominal_offsets,
+        optimized_offsets,
+        optimized_fps,
+    )
 
 
 def main() -> int:
@@ -730,7 +750,7 @@ def main() -> int:
     print(f"Overlapping days found: {len(overlap_days)}")
     print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
 
-    combined_curves: list[tuple[str, np.ndarray, float]] = []
+    combined_curves: list[tuple[str, np.ndarray, np.ndarray, float]] = []
 
     for day_key in selected_days:
         day_mkv_files = mkv_by_day[day_key]
@@ -742,7 +762,7 @@ def main() -> int:
 
         if args.workers == 1:
             for mkv_item in day_mkv_files:
-                optimized_offsets, optimized_fps = analyze_single_mkv(
+                nominal_offsets, optimized_offsets, optimized_fps = analyze_single_mkv(
                     mkv_path=mkv_item.path,
                     station_id=mkv_item.station_id,
                     mkv_start_utc=mkv_item.start_utc,
@@ -763,7 +783,12 @@ def main() -> int:
                     )
                 else:
                     combined_curves.append(
-                        (mkv_item.path.stem, optimized_offsets, optimized_fps)
+                        (
+                            mkv_item.path.stem,
+                            nominal_offsets,
+                            optimized_offsets,
+                            optimized_fps,
+                        )
                     )
             continue
 
@@ -784,7 +809,13 @@ def main() -> int:
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = [executor.submit(run_batch_mkv_task, *task) for task in task_args]
             for future in as_completed(futures):
-                output_text, label, optimized_offsets, optimized_fps = future.result()
+                (
+                    output_text,
+                    label,
+                    nominal_offsets,
+                    optimized_offsets,
+                    optimized_fps,
+                ) = future.result()
                 print(output_text, end="")
                 curve_std_ms = optimized_curve_std_ms(optimized_offsets)
                 if has_negative_offsets(optimized_offsets):
@@ -797,30 +828,45 @@ def main() -> int:
                         f"> {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms"
                     )
                 else:
-                    combined_curves.append((label, optimized_offsets, optimized_fps))
+                    combined_curves.append(
+                        (label, nominal_offsets, optimized_offsets, optimized_fps)
+                    )
 
     if combined_curves:
-        plot_combined_optimized_offsets(combined_curves, plot_output)
+        optimized_only_curves = [
+            (label, optimized_offsets, optimized_fps)
+            for label, _, optimized_offsets, optimized_fps in combined_curves
+        ]
+        plot_combined_optimized_offsets(optimized_only_curves, plot_output)
         print(f"\nSaved combined optimized-offset plot to: {plot_output}")
 
         sample_count = min(5, len(combined_curves))
         sampled_curves = random.sample(combined_curves, k=sample_count)
         print(f"Creating {sample_count} randomly selected single-curve optimized plots")
-        for index, (label, offsets, optimized_fps) in enumerate(sampled_curves, start=1):
+        for index, (label, nominal_offsets, offsets, optimized_fps) in enumerate(
+            sampled_curves, start=1
+        ):
             sample_plot = plot_output.with_name(
                 f"{plot_output.stem}_sample_{index}_{sanitize_for_filename(label)}.png"
             )
-            plot_single_optimized_curve(label, offsets, optimized_fps, sample_plot)
+            plot_single_optimized_curve(
+                label,
+                nominal_offsets,
+                offsets,
+                optimized_fps,
+                args.fps,
+                sample_plot,
+            )
             print(f"Saved single optimized curve plot to: {sample_plot}")
 
         fps_plot = plot_output.with_name(f"{plot_output.stem}_optimized_fps.png")
-        plot_optimized_frame_rates(combined_curves, fps_plot)
+        plot_optimized_frame_rates(optimized_only_curves, fps_plot)
         print(f"Saved optimized frame-rate plot to: {fps_plot}")
 
         summary_band_plot = plot_output.with_name(
             f"{plot_output.stem}_optimized_offset_summary_band.png"
         )
-        plot_optimized_offset_summary_band(combined_curves, summary_band_plot)
+        plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot)
         print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
     else:
         print(
