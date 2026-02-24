@@ -20,6 +20,9 @@ import numpy as np
 OPTIMIZED_CURVE_STD_THRESHOLD_MS = 40.0
 
 
+_WORKER_FT_TIMES: np.ndarray | None = None
+
+
 FT_FILENAME_PATTERN = re.compile(
     r"^FT_(?P<station>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.bin$"
 )
@@ -494,22 +497,19 @@ def plot_optimized_offset_histogram(
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = np.diff(bin_edges)
 
+    raw_bin_idx = np.searchsorted(bin_edges, all_offsets_ms, side="right") - 1
+    valid_mask = (raw_bin_idx >= 0) & (raw_bin_idx < len(counts))
+    finite_unix_mask = np.isfinite(all_unix_times)
+    use_mask = valid_mask & finite_unix_mask
+
     bar_avg_unix = np.full(len(counts), np.nan, dtype=float)
-    for index in range(len(counts)):
-        left = bin_edges[index]
-        right = bin_edges[index + 1]
-        if index == len(counts) - 1:
-            mask = (all_offsets_ms >= left) & (all_offsets_ms <= right)
-        else:
-            mask = (all_offsets_ms >= left) & (all_offsets_ms < right)
-
-        if not np.any(mask):
-            continue
-
-        unix_values = all_unix_times[mask]
-        finite_unix = unix_values[np.isfinite(unix_values)]
-        if finite_unix.size > 0:
-            bar_avg_unix[index] = float(np.mean(finite_unix))
+    if np.any(use_mask):
+        used_idx = raw_bin_idx[use_mask]
+        used_unix = all_unix_times[use_mask]
+        bin_sums = np.bincount(used_idx, weights=used_unix, minlength=len(counts))
+        bin_counts = np.bincount(used_idx, minlength=len(counts))
+        nonzero = bin_counts > 0
+        bar_avg_unix[nonzero] = bin_sums[nonzero] / bin_counts[nonzero]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(bin_centers, counts, width=bin_widths, align="center")
@@ -654,10 +654,12 @@ def run_batch_mkv_task(
     station_id: str,
     mkv_start_iso: str,
     frame_rate: float,
-    ft_times: np.ndarray,
 ) -> tuple[str, str, np.ndarray, np.ndarray, float, np.ndarray]:
     mkv_path = Path(mkv_path_str)
     mkv_start_utc = datetime.fromisoformat(mkv_start_iso)
+
+    if _WORKER_FT_TIMES is None:
+        raise RuntimeError("Worker FT times not initialized")
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
@@ -666,7 +668,7 @@ def run_batch_mkv_task(
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
             frame_rate=frame_rate,
-            ft_times=ft_times,
+            ft_times=_WORKER_FT_TIMES,
             plot_output=None,
             print_offsets_by_frame=False,
         )
@@ -679,6 +681,11 @@ def run_batch_mkv_task(
         optimized_fps,
         optimized_implied_times,
     )
+
+
+def _init_worker_ft_times(ft_times: np.ndarray) -> None:
+    global _WORKER_FT_TIMES
+    _WORKER_FT_TIMES = ft_times
 
 
 def main() -> int:
@@ -875,7 +882,7 @@ def main() -> int:
             continue
 
         print(f"Processing day {day_key} MKV files with multiprocessing workers={args.workers}")
-        task_args: list[tuple[str, str, str, float, np.ndarray]] = []
+        task_args: list[tuple[str, str, str, float]] = []
         for mkv_item in day_mkv_files:
             task_args.append(
                 (
@@ -883,11 +890,14 @@ def main() -> int:
                     mkv_item.station_id,
                     mkv_item.start_utc.isoformat(),
                     args.fps,
-                    day_ft_times,
                 )
             )
 
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=args.workers,
+            initializer=_init_worker_ft_times,
+            initargs=(day_ft_times,),
+        ) as executor:
             futures = [executor.submit(run_batch_mkv_task, *task) for task in task_args]
             for future in as_completed(futures):
                 (
