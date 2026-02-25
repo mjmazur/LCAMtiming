@@ -652,7 +652,39 @@ def plot_optimized_offset_histogram(
         bar_avg_unix[nonzero] = bin_sums[nonzero] / bin_counts[nonzero]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar(bin_centers, counts, width=bin_widths, align="center")
+    bars = ax.bar(bin_centers, counts, width=bin_widths, align="center", alpha=0.6)
+
+    # PDF calculation and overlay
+    if all_offsets_ms.size >= 2:
+        from scipy.stats import gaussian_kde, skew
+        kde = gaussian_kde(all_offsets_ms)
+        x_kde = np.linspace(bin_edges[0], bin_edges[-1], 200)
+        y_kde = kde(x_kde)
+        
+        # Scale KDE to match histogram counts
+        bin_width = bin_edges[1] - bin_edges[0]
+        y_kde_scaled = y_kde * len(all_offsets_ms) * bin_width
+        
+        ax.plot(x_kde, y_kde_scaled, color="red", linewidth=2, label="PDF (KDE)")
+        
+        # Stats
+        peak_idx = np.argmax(y_kde)
+        peak_loc = x_kde[peak_idx]
+        std_val = np.std(all_offsets_ms)
+        skew_val = skew(all_offsets_ms)
+        
+        stats_text = (
+            f"Peak: {peak_loc:.6f} ms\n"
+            f"Std: {std_val:.6f} ms\n"
+            f"Skew: {skew_val:.6f}"
+        )
+        ax.text(
+            0.95, 0.95, stats_text,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
 
     finite_bar_unix = bar_avg_unix[np.isfinite(bar_avg_unix)]
     if finite_bar_unix.size > 0:
@@ -661,8 +693,7 @@ def plot_optimized_offset_histogram(
         unix_max = float(np.max(finite_bar_unix))
         if np.isclose(unix_min, unix_max):
             norm = plt.Normalize(unix_min - 0.5, unix_max + 0.5)
-        else:
-            norm = plt.Normalize(unix_min, unix_max)
+        else: norm = plt.Normalize(unix_min, unix_max)
 
         for bar, avg_unix in zip(bars, bar_avg_unix):
             if np.isfinite(avg_unix):
@@ -681,6 +712,8 @@ def plot_optimized_offset_histogram(
     ax.set_xlabel("Optimized offset (FT - implied) [ms]")
     ax.set_ylabel("Count")
     ax.set_title("Histogram of optimized offsets")
+    if "PDF (KDE)" in [l.get_label() for l in ax.get_lines()]:
+        ax.legend(loc="upper left")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -698,10 +731,44 @@ def plot_optimized_fps_histogram(
     fps_values = np.array([optimized_fps for _, _, optimized_fps in curves], dtype=float)
 
     plt.figure(figsize=(10, 5))
-    plt.hist(fps_values, bins=min(30, max(5, len(fps_values))))
+    counts, bins, bars = plt.hist(fps_values, bins=min(30, max(5, len(fps_values))), alpha=0.6, label="Histogram")
+    
+    # PDF calculation and overlay
+    if fps_values.size >= 2:
+        from scipy.stats import gaussian_kde, skew
+        kde = gaussian_kde(fps_values)
+        x_kde = np.linspace(np.min(fps_values), np.max(fps_values), 200)
+        y_kde = kde(x_kde)
+        
+        # Scale KDE to match histogram counts
+        bin_width = bins[1] - bins[0]
+        y_kde_scaled = y_kde * len(fps_values) * bin_width
+        
+        plt.plot(x_kde, y_kde_scaled, color="red", linewidth=2, label="PDF (KDE)")
+        
+        # Stats
+        peak_idx = np.argmax(y_kde)
+        peak_loc = x_kde[peak_idx]
+        std_val = np.std(fps_values)
+        skew_val = skew(fps_values)
+        
+        stats_text = (
+            f"Peak: {peak_loc:.6f} fps\n"
+            f"Std: {std_val:.6f} fps\n"
+            f"Skew: {skew_val:.6f}"
+        )
+        plt.gca().text(
+            0.95, 0.95, stats_text,
+            transform=plt.gca().transAxes,
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
+
     plt.xlabel("Optimized FPS")
     plt.ylabel("Count")
     plt.title("Histogram of optimized frame rates")
+    plt.legend(loc="upper left")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
