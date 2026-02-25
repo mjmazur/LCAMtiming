@@ -479,29 +479,39 @@ def plot_combined_optimized_offsets(
     y_min = min_ms - pad_ms
     y_max = max_ms + pad_ms
 
-    plt.figure(figsize=(12, 6))
-    for label, curve_offsets, optimized_fps in curves:
+    # Determine time range for coloring based on the first timestamp of each curve.
+    curve_times = np.array([unix_times[0] for _, _, _, unix_times in curves])
+    t_min, t_max = np.min(curve_times), np.max(curve_times)
+    
+    import matplotlib.colors as mcolors
+    if np.isclose(t_min, t_max):
+        norm = mcolors.Normalize(t_min - 1, t_max + 1)
+    else:
+        norm = mcolors.Normalize(t_min, t_max)
+    cmap = plt.get_cmap("viridis")
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for (label, curve_offsets, optimized_fps, _), start_t in zip(curves, curve_times):
         frame_idx = np.arange(len(curve_offsets))
         curve_ms = curve_offsets * 1000.0
-        plt.plot(
-            frame_idx,
-            curve_ms,
-            linewidth=1.0,
-            label=f"{label} (opt FPS={optimized_fps:.6f})",
-        )
+        ax.plot(frame_idx, curve_ms, linewidth=0.5, alpha=0.3, color=cmap(norm(start_t)))
 
-    plt.xlabel("Frame index")
-    plt.ylabel("Offset (FT - implied) [ms]")
-    plt.title("Optimized MKV offset curves")
-    plt.ylim(y_min, y_max)
-    plt.legend(loc="center left", bbox_to_anchor=(0.5, -0.15),fontsize=8)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    colorbar = fig.colorbar(sm, ax=ax)
+    colorbar.set_label("MKV start time (Unix)")
+
+    ax.set_xlabel("Frame index")
+    ax.set_ylabel("Offset (FT - implied) [ms]")
+    ax.set_title(f"Combined accepted optimized curves ({len(curves)} files)")
+    ax.set_ylim(y_min, y_max)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_optimized_offset_density(
-    curves: list[tuple[str, np.ndarray, float]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
 ) -> None:
     """Plot 2D density representation of optimized offsets across all curves."""
@@ -591,7 +601,7 @@ def plot_single_optimized_curve(
 
 
 def plot_optimized_offset_summary_band(
-    curves: list[tuple[str, np.ndarray, float]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
 ) -> None:
     """Plot per-curve mean offsets with min-max fill band."""
