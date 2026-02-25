@@ -620,6 +620,7 @@ def plot_optimized_offset_summary_band(
 def plot_optimized_offset_histogram(
     curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
+    color_by_day_of_year: bool = False,
 ) -> None:
     """Plot histogram of optimized offsets with bars colored by average Unix time."""
 
@@ -632,24 +633,33 @@ def plot_optimized_offset_histogram(
         [unix_times for _, _, _, unix_times in curves]
     )
 
+    color_vals = all_unix_times
+    color_label = "Average Unix time"
+    if color_by_day_of_year:
+        # Vectorized conversion to day of year using NumPy datetime64.
+        all_dt = all_unix_times.astype("datetime64[s]")
+        day_of_year = (all_dt.astype("datetime64[D]") - all_dt.astype("datetime64[Y]") + np.timedelta64(1, "D")).astype(int)
+        color_vals = day_of_year
+        color_label = "Average Day of Year"
+
     counts, bin_edges = np.histogram(all_offsets_ms, bins=60)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_widths = np.diff(bin_edges)
 
-    # Vectorized bin assignment and per-bin average Unix-time computation.
+    # Vectorized bin assignment and per-bin average color-value computation.
     raw_bin_idx = np.searchsorted(bin_edges, all_offsets_ms, side="right") - 1
     valid_mask = (raw_bin_idx >= 0) & (raw_bin_idx < len(counts))
     finite_unix_mask = np.isfinite(all_unix_times)
     use_mask = valid_mask & finite_unix_mask
 
-    bar_avg_unix = np.full(len(counts), np.nan, dtype=float)
+    bar_avg_color = np.full(len(counts), np.nan, dtype=float)
     if np.any(use_mask):
         used_idx = raw_bin_idx[use_mask]
-        used_unix = all_unix_times[use_mask]
-        bin_sums = np.bincount(used_idx, weights=used_unix, minlength=len(counts))
+        used_color = color_vals[use_mask]
+        bin_sums = np.bincount(used_idx, weights=used_color, minlength=len(counts))
         bin_counts = np.bincount(used_idx, minlength=len(counts))
         nonzero = bin_counts > 0
-        bar_avg_unix[nonzero] = bin_sums[nonzero] / bin_counts[nonzero]
+        bar_avg_color[nonzero] = bin_sums[nonzero] / bin_counts[nonzero]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(bin_centers, counts, width=bin_widths, align="center", alpha=0.6)
@@ -686,25 +696,25 @@ def plot_optimized_offset_histogram(
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
         )
 
-    finite_bar_unix = bar_avg_unix[np.isfinite(bar_avg_unix)]
-    if finite_bar_unix.size > 0:
+    finite_bar_color = bar_avg_color[np.isfinite(bar_avg_color)]
+    if finite_bar_color.size > 0:
         cmap = plt.get_cmap("viridis")
-        unix_min = float(np.min(finite_bar_unix))
-        unix_max = float(np.max(finite_bar_unix))
-        if np.isclose(unix_min, unix_max):
-            norm = plt.Normalize(unix_min - 0.5, unix_max + 0.5)
-        else: norm = plt.Normalize(unix_min, unix_max)
+        color_min = float(np.min(finite_bar_color))
+        color_max = float(np.max(finite_bar_color))
+        if np.isclose(color_min, color_max):
+            norm = plt.Normalize(color_min - 0.5, color_max + 0.5)
+        else: norm = plt.Normalize(color_min, color_max)
 
-        for bar, avg_unix in zip(bars, bar_avg_unix):
-            if np.isfinite(avg_unix):
-                bar.set_color(cmap(norm(avg_unix)))
+        for bar, avg_c in zip(bars, bar_avg_color):
+            if np.isfinite(avg_c):
+                bar.set_color(cmap(norm(avg_c)))
             else:
                 bar.set_color("tab:gray")
 
         scalar_mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         scalar_mappable.set_array([])
         colorbar = fig.colorbar(scalar_mappable, ax=ax)
-        colorbar.set_label("Average Unix time")
+        colorbar.set_label(color_label)
     else:
         for bar in bars:
             bar.set_color("tab:blue")
@@ -720,18 +730,68 @@ def plot_optimized_offset_histogram(
 
 
 def plot_optimized_fps_histogram(
-    curves: list[tuple[str, np.ndarray, float]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
+    color_by_day_of_year: bool = False,
 ) -> None:
     """Plot histogram of optimized frame rates across accepted curves."""
 
     # Distribution of optimized frame rates across accepted curves.
     import matplotlib.pyplot as plt
 
-    fps_values = np.array([optimized_fps for _, _, optimized_fps in curves], dtype=float)
+    fps_values = np.array([optimized_fps for _, _, optimized_fps, _ in curves], dtype=float)
+    
+    # We need a single time per curve to color the FPS histogram bars.
+    # We'll use the mean time of each curve.
+    curve_times = np.array([np.mean(unix_times) for _, _, _, unix_times in curves], dtype=float)
 
-    plt.figure(figsize=(10, 5))
-    counts, bins, bars = plt.hist(fps_values, bins=min(30, max(5, len(fps_values))), alpha=0.6, label="Histogram")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    counts, bins, bars = ax.hist(fps_values, bins=min(30, max(5, len(fps_values))), alpha=0.6, label="Histogram")
+    
+    color_vals = curve_times
+    color_label = "Average Unix time"
+    if color_by_day_of_year:
+        # Convert to day of year.
+        all_dt = curve_times.astype("datetime64[s]")
+        day_of_year = (all_dt.astype("datetime64[D]") - all_dt.astype("datetime64[Y]") + np.timedelta64(1, "D")).astype(int)
+        color_vals = day_of_year
+        color_label = "Average Day of Year"
+
+    # Color the bars by the average time of the values within each bin.
+    # Determine which bin each curve's FPS belongs to.
+    bin_idx = np.searchsorted(bins, fps_values, side="right") - 1
+    # Handle values exactly on the right edge.
+    bin_idx[fps_values == bins[-1]] = len(counts) - 1
+    
+    bar_avg_color = np.full(len(counts), np.nan, dtype=float)
+    for i in range(len(counts)):
+        mask = (bin_idx == i)
+        if np.any(mask):
+            bar_avg_color[i] = np.mean(color_vals[mask])
+
+    finite_bar_color = bar_avg_color[np.isfinite(bar_avg_color)]
+    if finite_bar_color.size > 0:
+        cmap = plt.get_cmap("viridis")
+        color_min = float(np.min(finite_bar_color))
+        color_max = float(np.max(finite_bar_color))
+        if np.isclose(color_min, color_max):
+            norm = plt.Normalize(color_min - 0.5, color_max + 0.5)
+        else: norm = plt.Normalize(color_min, color_max)
+
+        for i, bar in enumerate(bars):
+            avg_c = bar_avg_color[i]
+            if np.isfinite(avg_c):
+                bar.set_color(cmap(norm(avg_c)))
+            else:
+                bar.set_color("tab:gray")
+
+        scalar_mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        scalar_mappable.set_array([])
+        colorbar = fig.colorbar(scalar_mappable, ax=ax)
+        colorbar.set_label(color_label)
+    else:
+        for bar in bars:
+            bar.set_color("tab:blue")
     
     # PDF calculation and overlay
     if fps_values.size >= 2:
@@ -1265,7 +1325,11 @@ def main() -> int:
         )
         created = try_create_plot(
             f"optimized offset histogram ({offset_hist_plot})",
-            lambda: plot_optimized_offset_histogram(optimized_curves_with_time, offset_hist_plot),
+            lambda: plot_optimized_offset_histogram(
+                optimized_curves_with_time,
+                offset_hist_plot,
+                color_by_day_of_year=(args.number_of_days > 1)
+            ),
         )
         if created:
             print(f"Saved optimized offset histogram to: {offset_hist_plot}")
@@ -1275,7 +1339,11 @@ def main() -> int:
         )
         created = try_create_plot(
             f"optimized frame-rate histogram ({fps_hist_plot})",
-            lambda: plot_optimized_fps_histogram(optimized_only_curves, fps_hist_plot),
+            lambda: plot_optimized_fps_histogram(
+                optimized_curves_with_time,
+                fps_hist_plot,
+                color_by_day_of_year=(args.number_of_days > 1)
+            ),
         )
         if created:
             print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
