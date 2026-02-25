@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import pickle
 import random
 import re
 import subprocess
@@ -1054,6 +1055,11 @@ def main() -> int:
         default=None,
         help="Camera ID to automatically set mkvdir and ftdir under /mnt/RMS_data.",
     )
+    parser.add_argument(
+        "--pickle-output",
+        default=None,
+        help="Optional path to save calculated offsets and frame rates as a pickle file.",
+    )
     args = parser.parse_args()
 
     # If camera-id is specified, override mkvdir and ftdir.
@@ -1066,6 +1072,12 @@ def main() -> int:
     figures_dir = requested_plot_output.parent / "Figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     plot_output = figures_dir / requested_plot_output.name
+
+    # If pickle-output not specified, default to same name/location as plot_output.
+    if args.pickle_output is None:
+        args.pickle_output = plot_output.with_suffix(".pkl")
+    else:
+        args.pickle_output = Path(args.pickle_output).expanduser().resolve()
 
     if args.number_of_days < 1:
         print("--number-of-days must be >= 1")
@@ -1121,7 +1133,7 @@ def main() -> int:
         if created:
             print(f"Saved FT interval histogram to: {ft_interval_plot}")
 
-        analyze_single_mkv(
+        offsets, optimized_offsets, optimized_fps, optimized_implied_times = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
@@ -1130,88 +1142,48 @@ def main() -> int:
             plot_output=plot_output,
             print_offsets_by_frame=True,
         )
-        return 0
-
-    mkv_root = Path(args.mkvdir).expanduser().resolve()
-    ft_root = Path(args.ftdir).expanduser().resolve()
-
-    if not mkv_root.is_dir():
-        print(f"MKV directory is not valid: {mkv_root}")
-        return 1
-    if not ft_root.is_dir():
-        print(f"FT directory is not valid: {ft_root}")
-        return 1
-
-    # Batch mode: discover files and keep only overlapping days.
-    mkv_meta = discover_mkv_meta(mkv_root)
-    if not mkv_meta:
-        print(f"No matching MKV files found under {mkv_root}")
-        return 1
-
-    ft_files = discover_ft_files(ft_root)
-    if not ft_files:
-        print(f"No matching FT files found under {ft_root}")
-        return 1
-
-    mkv_by_day = group_mkv_by_day(mkv_meta)
-    ft_by_day = group_ft_by_day(ft_files)
-    overlap_days = sorted(set(mkv_by_day).intersection(ft_by_day))
-
-    if not overlap_days:
-        print("No overlapping MKV/FT days found between the provided directories")
-        return 1
-
-    selected_days = overlap_days[: args.number_of_days]
-    print(f"Overlapping days found: {len(overlap_days)}")
-    print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
-
-    # Accepted curves after filtering; used for aggregate plots.
-    combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, np.ndarray]] = []
-
-    # Process MKVs either serially or in parallel.
-    if args.workers == 1:
-        for day_key in selected_days:
-            day_mkv_files = mkv_by_day[day_key]
-            day_ft_files = ft_by_day[day_key]
-            print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
-
-            day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
-            print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
-
-            day_ft_interval_plot = plot_output.with_name(
-                f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
-            )
-            try_create_plot(
-                f"FT interval histogram ({day_ft_interval_plot})",
-                lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
-            )
-
-            for mkv_item in day_mkv_files:
-                (
-                    nominal_offsets,
-                    optimized_offsets,
-                    optimized_fps,
-                    optimized_implied_times,
-                ) = analyze_single_mkv(
-                    mkv_path=mkv_item.path,
-                    station_id=mkv_item.station_id,
-                    mkv_start_utc=mkv_item.start_utc,
-                    frame_rate=args.fps,
-                    ft_times=day_ft_times,
-                    plot_output=None,
-                    print_offsets_by_frame=False,
-                )
-                
-                curve_std_ms = optimized_curve_std_ms(optimized_offsets)
-                if has_negative_offsets(optimized_offsets):
-                    print(f"Discarding curve {mkv_item.path.stem}: contains negative offsets")
-                elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
-                    print(f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
-                else:
-                    combined_curves.append((mkv_item.path.stem, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+        
+        # Populate combined_curves for pickle output even in single mode.
+        combined_curves = [(mkv_path.stem, offsets, optimized_offsets, optimized_fps, optimized_implied_times)]
     else:
-        print(f"Processing MKV files with multiprocessing workers={args.workers}")
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        mkv_root = Path(args.mkvdir).expanduser().resolve()
+        ft_root = Path(args.ftdir).expanduser().resolve()
+
+        if not mkv_root.is_dir():
+            print(f"MKV directory is not valid: {mkv_root}")
+            return 1
+        if not ft_root.is_dir():
+            print(f"FT directory is not valid: {ft_root}")
+            return 1
+
+        # Batch mode: discover files and keep only overlapping days.
+        mkv_meta = discover_mkv_meta(mkv_root)
+        if not mkv_meta:
+            print(f"No matching MKV files found under {mkv_root}")
+            return 1
+
+        ft_files = discover_ft_files(ft_root)
+        if not ft_files:
+            print(f"No matching FT files found under {ft_root}")
+            return 1
+
+        mkv_by_day = group_mkv_by_day(mkv_meta)
+        ft_by_day = group_ft_by_day(ft_files)
+        overlap_days = sorted(set(mkv_by_day).intersection(ft_by_day))
+
+        if not overlap_days:
+            print("No overlapping MKV/FT days found between the provided directories")
+            return 1
+
+        selected_days = overlap_days[: args.number_of_days]
+        print(f"Overlapping days found: {len(overlap_days)}")
+        print(f"Processing first {len(selected_days)} day(s): {', '.join(selected_days)}")
+
+        # Accepted curves after filtering; used for aggregate plots.
+        combined_curves: list[tuple[str, np.ndarray, np.ndarray, float, np.ndarray]] = []
+
+        # Process MKVs either serially or in parallel.
+        if args.workers == 1:
             for day_key in selected_days:
                 day_mkv_files = mkv_by_day[day_key]
                 day_ft_files = ft_by_day[day_key]
@@ -1228,129 +1200,181 @@ def main() -> int:
                     lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
                 )
 
-                futures = []
                 for mkv_item in day_mkv_files:
-                    futures.append(
-                        executor.submit(
-                            run_batch_mkv_task,
-                            str(mkv_item.path),
-                            mkv_item.station_id,
-                            mkv_item.start_utc.isoformat(),
-                            args.fps,
-                            day_ft_times,
-                        )
-                    )
-
-                for future in as_completed(futures):
                     (
-                        output_text,
-                        label,
                         nominal_offsets,
                         optimized_offsets,
                         optimized_fps,
                         optimized_implied_times,
-                    ) = future.result()
-                    print(output_text, end="")
+                    ) = analyze_single_mkv(
+                        mkv_path=mkv_item.path,
+                        station_id=mkv_item.station_id,
+                        mkv_start_utc=mkv_item.start_utc,
+                        frame_rate=args.fps,
+                        ft_times=day_ft_times,
+                        plot_output=None,
+                        print_offsets_by_frame=False,
+                    )
                     
                     curve_std_ms = optimized_curve_std_ms(optimized_offsets)
                     if has_negative_offsets(optimized_offsets):
-                        print(f"Discarding curve {label}: contains negative offsets")
+                        print(f"Discarding curve {mkv_item.path.stem}: contains negative offsets")
                     elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
-                        print(f"Discarding curve {label}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
+                        print(f"Discarding curve {mkv_item.path.stem}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
                     else:
-                        combined_curves.append((label, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+                        combined_curves.append((mkv_item.path.stem, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+        else:
+            print(f"Processing MKV files with multiprocessing workers={args.workers}")
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                for day_key in selected_days:
+                    day_mkv_files = mkv_by_day[day_key]
+                    day_ft_files = ft_by_day[day_key]
+                    print(f"\n=== Day {day_key}: MKV files={len(day_mkv_files)}, FT files={len(day_ft_files)} ===")
 
-    if combined_curves:
-        # Build derived curve representations for different aggregate plots.
-        optimized_only_curves = [
-            (label, optimized_offsets, optimized_fps)
-            for label, _, optimized_offsets, optimized_fps, _ in combined_curves
-        ]
-        optimized_curves_with_time = [
-            (label, optimized_offsets, optimized_fps, optimized_implied_times)
-            for label, _, optimized_offsets, optimized_fps, optimized_implied_times in combined_curves
-        ]
-        created = try_create_plot(
-            f"combined optimized-offset plot ({plot_output})",
-            lambda: plot_combined_optimized_offsets(optimized_only_curves, plot_output),
-        )
-        if created:
-            print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+                    day_ft_times = collect_ft_times_seconds(day_ft_files, rms_root)
+                    print(f"FT time entries for day {day_key}: {len(day_ft_times)}")
 
-        density_plot = plot_output.with_name(
-            f"{plot_output.stem}_optimized_offset_density_2d.png"
-        )
-        created = try_create_plot(
-            f"2D density offset plot ({density_plot})",
-            lambda: plot_optimized_offset_density(optimized_only_curves, density_plot),
-        )
-        if created:
-            print(f"Saved 2D density offset plot to: {density_plot}")
+                    day_ft_interval_plot = plot_output.with_name(
+                        f"{plot_output.stem}_ft_interval_hist_{day_key}.png"
+                    )
+                    try_create_plot(
+                        f"FT interval histogram ({day_ft_interval_plot})",
+                        lambda: plot_ft_interval_histogram(day_ft_times, day_ft_interval_plot),
+                    )
 
-        sample_count = min(5, len(combined_curves))
-        sampled_curves = random.sample(combined_curves, k=sample_count)
-        print(f"Creating {sample_count} randomly selected single-curve optimized plots")
-        for index, (label, nominal_offsets, offsets, optimized_fps, _) in enumerate(
-            sampled_curves, start=1
-        ):
-            sample_plot = plot_output.with_name(
-                f"{plot_output.stem}_sample_{index}_{sanitize_for_filename(label)}.png"
+                    futures = []
+                    for mkv_item in day_mkv_files:
+                        futures.append(
+                            executor.submit(
+                                run_batch_mkv_task,
+                                str(mkv_item.path),
+                                mkv_item.station_id,
+                                mkv_item.start_utc.isoformat(),
+                                args.fps,
+                                day_ft_times,
+                            )
+                        )
+
+                    for future in as_completed(futures):
+                        (
+                            output_text,
+                            label,
+                            nominal_offsets,
+                            optimized_offsets,
+                            optimized_fps,
+                            optimized_implied_times,
+                        ) = future.result()
+                        print(output_text, end="")
+                        
+                        curve_std_ms = optimized_curve_std_ms(optimized_offsets)
+                        if has_negative_offsets(optimized_offsets):
+                            print(f"Discarding curve {label}: contains negative offsets")
+                        elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
+                            print(f"Discarding curve {label}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
+                        else:
+                            combined_curves.append((label, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+
+        if combined_curves:
+            # Build derived curve representations for different aggregate plots.
+            optimized_only_curves = [
+                (label, optimized_offsets, optimized_fps)
+                for label, _, optimized_offsets, optimized_fps, _ in combined_curves
+            ]
+            optimized_curves_with_time = [
+                (label, optimized_offsets, optimized_fps, optimized_implied_times)
+                for label, _, optimized_offsets, optimized_fps, optimized_implied_times in combined_curves
+            ]
+            created = try_create_plot(
+                f"combined optimized-offset plot ({plot_output})",
+                lambda: plot_combined_optimized_offsets(optimized_only_curves, plot_output),
+            )
+            if created:
+                print(f"\nSaved combined optimized-offset plot to: {plot_output}")
+
+            density_plot = plot_output.with_name(
+                f"{plot_output.stem}_optimized_offset_density_2d.png"
             )
             created = try_create_plot(
-                f"single optimized curve plot ({sample_plot})",
-                lambda label=label, nominal_offsets=nominal_offsets, offsets=offsets, optimized_fps=optimized_fps, sample_plot=sample_plot: plot_single_optimized_curve(
-                    label,
-                    nominal_offsets,
-                    offsets,
-                    optimized_fps,
-                    args.fps,
-                    sample_plot,
+                f"2D density offset plot ({density_plot})",
+                lambda: plot_optimized_offset_density(optimized_only_curves, density_plot),
+            )
+            if created:
+                print(f"Saved 2D density offset plot to: {density_plot}")
+
+            sample_count = min(5, len(combined_curves))
+            sampled_curves = random.sample(combined_curves, k=sample_count)
+            print(f"Creating {sample_count} randomly selected single-curve optimized plots")
+            for index, (label, nominal_offsets, offsets, optimized_fps, _) in enumerate(
+                sampled_curves, start=1
+            ):
+                sample_plot = plot_output.with_name(
+                    f"{plot_output.stem}_sample_{index}_{sanitize_for_filename(label)}.png"
+                )
+                created = try_create_plot(
+                    f"single optimized curve plot ({sample_plot})",
+                    lambda label=label, nominal_offsets=nominal_offsets, offsets=offsets, optimized_fps=optimized_fps, sample_plot=sample_plot: plot_single_optimized_curve(
+                        label,
+                        nominal_offsets,
+                        offsets,
+                        optimized_fps,
+                        args.fps,
+                        sample_plot,
+                    ),
+                )
+                if created:
+                    print(f"Saved single optimized curve plot to: {sample_plot}")
+
+            summary_band_plot = plot_output.with_name(
+                f"{plot_output.stem}_optimized_offset_summary_band.png"
+            )
+            created = try_create_plot(
+                f"optimized offset-summary band plot ({summary_band_plot})",
+                lambda: plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot),
+            )
+            if created:
+                print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
+
+            offset_hist_plot = plot_output.with_name(
+                f"{plot_output.stem}_optimized_offset_hist.png"
+            )
+            created = try_create_plot(
+                f"optimized offset histogram ({offset_hist_plot})",
+                lambda: plot_optimized_offset_histogram(
+                    optimized_curves_with_time,
+                    offset_hist_plot,
+                    color_by_day_of_year=(args.number_of_days > 1)
                 ),
             )
             if created:
-                print(f"Saved single optimized curve plot to: {sample_plot}")
+                print(f"Saved optimized offset histogram to: {offset_hist_plot}")
 
-        summary_band_plot = plot_output.with_name(
-            f"{plot_output.stem}_optimized_offset_summary_band.png"
-        )
-        created = try_create_plot(
-            f"optimized offset-summary band plot ({summary_band_plot})",
-            lambda: plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot),
-        )
-        if created:
-            print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
+            fps_hist_plot = plot_output.with_name(
+                f"{plot_output.stem}_optimized_fps_hist.png"
+            )
+            created = try_create_plot(
+                f"optimized frame-rate histogram ({fps_hist_plot})",
+                lambda: plot_optimized_fps_histogram(
+                    optimized_curves_with_time,
+                    fps_hist_plot,
+                    color_by_day_of_year=(args.number_of_days > 1)
+                ),
+            )
+            if created:
+                print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
+            else:
+                print(
+                    "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
+                )
 
-        offset_hist_plot = plot_output.with_name(
-            f"{plot_output.stem}_optimized_offset_hist.png"
-        )
-        created = try_create_plot(
-            f"optimized offset histogram ({offset_hist_plot})",
-            lambda: plot_optimized_offset_histogram(
-                optimized_curves_with_time,
-                offset_hist_plot,
-                color_by_day_of_year=(args.number_of_days > 1)
-            ),
-        )
-        if created:
-            print(f"Saved optimized offset histogram to: {offset_hist_plot}")
-
-        fps_hist_plot = plot_output.with_name(
-            f"{plot_output.stem}_optimized_fps_hist.png"
-        )
-        created = try_create_plot(
-            f"optimized frame-rate histogram ({fps_hist_plot})",
-            lambda: plot_optimized_fps_histogram(
-                optimized_curves_with_time,
-                fps_hist_plot,
-                color_by_day_of_year=(args.number_of_days > 1)
-            ),
-        )
-        if created:
-            print(f"Saved optimized frame-rate histogram to: {fps_hist_plot}")
-    else:
-        print(
-            "\nNo optimized curves met the standard deviation threshold; combined plot was not created"
-        )
+    # Save to pickle.
+    if "combined_curves" in locals() and combined_curves:
+        pickle_path = args.pickle_output
+        try:
+            with open(pickle_path, "wb") as f:
+                pickle.dump(combined_curves, f)
+            print(f"\nSaved results for {len(combined_curves)} curve(s) to: {pickle_path}")
+        except Exception as exc:
+            print(f"Warning: failed to save pickle file: {exc}")
 
     return 0
 
