@@ -456,7 +456,7 @@ def plot_offsets(
 
 
 def plot_combined_optimized_offsets(
-    curves: list[tuple[str, np.ndarray, float]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
     output_path: Path,
 ) -> None:
     """Plot accepted optimized curves together on one combined chart."""
@@ -467,7 +467,7 @@ def plot_combined_optimized_offsets(
     if not curves:
         raise ValueError("No optimized curves available to plot")
 
-    all_offsets_ms = np.concatenate([curve_offsets * 1000.0 for _, curve_offsets, _ in curves])
+    all_offsets_ms = np.concatenate([curve_offsets * 1000.0 for _, curve_offsets, _, _ in curves])
     min_ms = float(np.min(all_offsets_ms))
     max_ms = float(np.max(all_offsets_ms))
 
@@ -514,7 +514,7 @@ def plot_optimized_offset_density(
     all_frame_indices = []
     all_offsets_ms = []
 
-    for _, offsets, _ in curves:
+    for _, offsets, _, _ in curves:
         indices = np.arange(len(offsets))
         offsets_ms = offsets * 1000.0
         all_frame_indices.append(indices)
@@ -599,10 +599,10 @@ def plot_optimized_offset_summary_band(
     # For each curve, show mean offset and min-max band.
     import matplotlib.pyplot as plt
 
-    labels = [label for label, _, _ in curves]
-    mean_ms = np.array([np.mean(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
-    min_ms = np.array([np.min(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
-    max_ms = np.array([np.max(offsets) * 1000.0 for _, offsets, _ in curves], dtype=float)
+    labels = [label for label, _, _, _ in curves]
+    mean_ms = np.array([np.mean(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
+    min_ms = np.array([np.min(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
+    max_ms = np.array([np.max(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
     indices = np.arange(len(curves))
 
     plt.figure(figsize=(max(10, len(curves) * 0.5), 5))
@@ -1286,7 +1286,7 @@ def main() -> int:
             ]
             created = try_create_plot(
                 f"combined optimized-offset plot ({plot_output})",
-                lambda: plot_combined_optimized_offsets(optimized_only_curves, plot_output),
+                lambda: plot_combined_optimized_offsets(optimized_curves_with_time, plot_output),
             )
             if created:
                 print(f"\nSaved combined optimized-offset plot to: {plot_output}")
@@ -1296,7 +1296,7 @@ def main() -> int:
             )
             created = try_create_plot(
                 f"2D density offset plot ({density_plot})",
-                lambda: plot_optimized_offset_density(optimized_only_curves, density_plot),
+                lambda: plot_optimized_offset_density(optimized_curves_with_time, density_plot),
             )
             if created:
                 print(f"Saved 2D density offset plot to: {density_plot}")
@@ -1329,7 +1329,7 @@ def main() -> int:
             )
             created = try_create_plot(
                 f"optimized offset-summary band plot ({summary_band_plot})",
-                lambda: plot_optimized_offset_summary_band(optimized_only_curves, summary_band_plot),
+                lambda: plot_optimized_offset_summary_band(optimized_curves_with_time, summary_band_plot),
             )
             if created:
                 print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
