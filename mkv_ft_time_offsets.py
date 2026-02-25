@@ -922,7 +922,17 @@ def main() -> int:
         default=1,
         help="Number of worker processes for batch mode MKV processing (default: 1).",
     )
+    parser.add_argument(
+        "--camera-id",
+        default=None,
+        help="Camera ID to automatically set mkvdir and ftdir under /mnt/RMS_data.",
+    )
     args = parser.parse_args()
+
+    # If camera-id is specified, override mkvdir and ftdir.
+    if args.camera_id:
+        args.mkvdir = f"/mnt/RMS_data/{args.camera_id}/VideoFiles"
+        args.ftdir = f"/mnt/RMS_data/{args.camera_id}/TimeFiles"
 
     rms_root = Path(args.rms_root).expanduser().resolve()
     requested_plot_output = Path(args.plot_output).expanduser().resolve()
