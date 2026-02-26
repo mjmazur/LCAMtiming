@@ -413,6 +413,7 @@ def plot_offsets(
     nominal_fps: float,
     optimized_fps: float,
     output_path: Path,
+    station_id: str = "Unknown",
 ) -> None:
     """Plot raw and optimized offsets for a single MKV analysis."""
 
@@ -448,7 +449,7 @@ def plot_offsets(
     )
     plt.xlabel("Frame index")
     plt.ylabel("Offset (FT - implied) [ms]")
-    plt.title("MKV implied frame time vs nearest FT time")
+    plt.title(f"MKV implied frame time vs nearest FT time (Station: {station_id})")
     plt.ylim(y_min, y_max)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
@@ -456,7 +457,7 @@ def plot_offsets(
 
 
 def plot_combined_optimized_offsets(
-    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray, str]],
     output_path: Path,
 ) -> None:
     """Plot accepted optimized curves together on one combined chart."""
@@ -467,7 +468,7 @@ def plot_combined_optimized_offsets(
     if not curves:
         raise ValueError("No optimized curves available to plot")
 
-    all_offsets_ms = np.concatenate([curve_offsets * 1000.0 for _, curve_offsets, _, _ in curves])
+    all_offsets_ms = np.concatenate([curve_offsets * 1000.0 for _, curve_offsets, _, _, _ in curves])
     min_ms = float(np.min(all_offsets_ms))
     max_ms = float(np.max(all_offsets_ms))
 
@@ -479,8 +480,12 @@ def plot_combined_optimized_offsets(
     y_min = min_ms - pad_ms
     y_max = max_ms + pad_ms
 
+    # Identify unique stations for the title.
+    unique_stations = sorted(list(set(station_id for _, _, _, _, station_id in curves)))
+    stations_str = ", ".join(unique_stations)
+
     # Determine time range for coloring based on the first timestamp of each curve.
-    curve_times = np.array([unix_times[0] for _, _, _, unix_times in curves])
+    curve_times = np.array([unix_times[0] for _, _, _, unix_times, _ in curves])
     t_min, t_max = np.min(curve_times), np.max(curve_times)
     
     import matplotlib.colors as mcolors
@@ -503,7 +508,7 @@ def plot_combined_optimized_offsets(
 
     ax.set_xlabel("Frame index")
     ax.set_ylabel("Offset (FT - implied) [ms]")
-    ax.set_title(f"Combined accepted optimized curves ({len(curves)} files)")
+    plt.title(f"Optimized MKV frame rate distribution ({len(curves)} files)\nStation(s): {stations_str}")
     ax.set_ylim(y_min, y_max)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -511,7 +516,7 @@ def plot_combined_optimized_offsets(
 
 
 def plot_optimized_offset_density(
-    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray, str]],
     output_path: Path,
 ) -> None:
     """Plot 2D density representation of optimized offsets across all curves."""
@@ -524,7 +529,7 @@ def plot_optimized_offset_density(
     all_frame_indices = []
     all_offsets_ms = []
 
-    for _, offsets, _, _ in curves:
+    for _, offsets, _, _, _ in curves:
         indices = np.arange(len(offsets))
         offsets_ms = offsets * 1000.0
         all_frame_indices.append(indices)
@@ -539,7 +544,9 @@ def plot_optimized_offset_density(
     plt.colorbar(label="Density (counts)")
     plt.xlabel("Frame index")
     plt.ylabel("Offset (FT - implied) [ms]")
-    plt.title("2D Density of optimized MKV offsets")
+    unique_stations = sorted(list(set(station_id for _, _, _, _, station_id in curves)))
+    stations_str = ", ".join(unique_stations)
+    plt.title(f"2D Density of optimized MKV offsets\nStation(s): {stations_str}")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -559,6 +566,7 @@ def plot_single_optimized_curve(
     optimized_fps: float,
     nominal_fps: float,
     output_path: Path,
+    station_id: str = "Unknown",
 ) -> None:
     """Plot raw and optimized offset curves for one sampled MKV result."""
 
@@ -592,7 +600,7 @@ def plot_single_optimized_curve(
     )
     plt.xlabel("Frame index")
     plt.ylabel("Offset (FT - implied) [ms]")
-    plt.title(f"Optimized offset curve: {label}")
+    plt.title(f"Optimized MKV offset distribution ({len(all_offsets_ms)} frames from {len(curves)} files)\nStation(s): {stations_str}")
     plt.ylim(min_ms - pad_ms, max_ms + pad_ms)
     plt.legend(loc="best")
     plt.tight_layout()
@@ -601,18 +609,23 @@ def plot_single_optimized_curve(
 
 
 def plot_optimized_offset_summary_band(
-    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray, str]],
     output_path: Path,
 ) -> None:
     """Plot per-curve mean offsets with min-max fill band."""
 
     # For each curve, show mean offset and min-max band.
     import matplotlib.pyplot as plt
+    from scipy.stats import norm, gaussian_kde, skew
 
-    labels = [label for label, _, _, _ in curves]
-    mean_ms = np.array([np.mean(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
-    min_ms = np.array([np.min(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
-    max_ms = np.array([np.max(offsets) * 1000.0 for _, offsets, _, _ in curves], dtype=float)
+    all_fps = np.array([c[2] for c in curves], dtype=float)
+    all_times = np.array([c[3][0] for c in curves], dtype=float)
+
+    unique_stations = sorted(list(set(c[4] for c in curves)))
+    stations_str = ", ".join(unique_stations)
+    mean_ms = np.array([np.mean(offsets) * 1000.0 for _, offsets, _, _, _ in curves], dtype=float)
+    min_ms = np.array([np.min(offsets) * 1000.0 for _, offsets, _, _, _ in curves], dtype=float)
+    max_ms = np.array([np.max(offsets) * 1000.0 for _, offsets, _, _, _ in curves], dtype=float)
     indices = np.arange(len(curves))
 
     plt.figure(figsize=(max(10, len(curves) * 0.5), 5))
@@ -620,7 +633,9 @@ def plot_optimized_offset_summary_band(
     plt.plot(indices, mean_ms, marker="o", linewidth=1.2, label="Mean offset")
     plt.xlabel("Curve index")
     plt.ylabel("Offset (FT - implied) [ms]")
-    plt.title("Optimized offset summary (mean with min-max band)")
+    unique_stations = sorted(list(set(station_id for _, _, _, _, station_id in curves)))
+    stations_str = ", ".join(unique_stations)
+    plt.title(f"Optimized offset summary (mean with min-max band)\nStation(s): {stations_str}")
     plt.xticks(indices, labels, rotation=45, ha="right", fontsize=8)
     plt.legend(loc="best")
     plt.tight_layout()
@@ -629,7 +644,7 @@ def plot_optimized_offset_summary_band(
 
 
 def plot_optimized_offset_histogram(
-    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray, str]],
     output_path: Path,
     color_by_day_of_year: bool = False,
 ) -> None:
@@ -638,11 +653,14 @@ def plot_optimized_offset_histogram(
     # Histogram of optimized offsets across all accepted curves.
     # Bar colors encode average implied Unix time in each bin.
     import matplotlib.pyplot as plt
+    from scipy.stats import norm, gaussian_kde, skew
 
-    all_offsets_ms = np.concatenate([offsets * 1000.0 for _, offsets, _, _ in curves])
-    all_unix_times = np.concatenate(
-        [unix_times for _, _, _, unix_times in curves]
-    )
+    all_offsets_ms = np.concatenate([c[1] * 1000.0 for c in curves])
+    all_times = np.concatenate([c[3] for c in curves])
+
+    unique_stations = sorted(list(set(c[4] for c in curves)))
+    stations_str = ", ".join(unique_stations)
+    all_unix_times = all_times
 
     color_vals = all_unix_times
     color_label = "Average Unix time"
@@ -732,7 +750,7 @@ def plot_optimized_offset_histogram(
 
     ax.set_xlabel("Optimized offset (FT - implied) [ms]")
     ax.set_ylabel("Count")
-    ax.set_title("Histogram of optimized offsets")
+    ax.set_title(f"Histogram of optimized offsets\nStation(s): {stations_str}")
     if "PDF (KDE)" in [l.get_label() for l in ax.get_lines()]:
         ax.legend(loc="upper left")
     fig.tight_layout()
@@ -741,7 +759,7 @@ def plot_optimized_offset_histogram(
 
 
 def plot_optimized_fps_histogram(
-    curves: list[tuple[str, np.ndarray, float, np.ndarray]],
+    curves: list[tuple[str, np.ndarray, float, np.ndarray, str]],
     output_path: Path,
     color_by_day_of_year: bool = False,
 ) -> None:
@@ -750,11 +768,13 @@ def plot_optimized_fps_histogram(
     # Distribution of optimized frame rates across accepted curves.
     import matplotlib.pyplot as plt
 
-    fps_values = np.array([optimized_fps for _, _, optimized_fps, _ in curves], dtype=float)
+    fps_values = np.array([c[2] for c in curves], dtype=float)
     
     # We need a single time per curve to color the FPS histogram bars.
     # We'll use the mean time of each curve.
-    curve_times = np.array([np.mean(unix_times) for _, _, _, unix_times in curves], dtype=float)
+    curve_times = np.array([np.mean(c[3]) for c in curves], dtype=float)
+    unique_stations = sorted(list(set(c[4] for c in curves)))
+    stations_str = ", ".join(unique_stations)
 
     fig, ax = plt.subplots(figsize=(10, 5))
     counts, bins, bars = ax.hist(fps_values, bins=min(30, max(5, len(fps_values))), alpha=0.6, label="Histogram")
@@ -828,21 +848,21 @@ def plot_optimized_fps_histogram(
             f"Std: {std_val:.6f} fps\n"
             f"Skew: {skew_val:.6f}"
         )
-        plt.gca().text(
+        ax.text(
             0.95, 0.95, stats_text,
-            transform=plt.gca().transAxes,
+            transform=ax.transAxes,
             verticalalignment="top",
             horizontalalignment="right",
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
         )
 
-    plt.xlabel("Optimized FPS")
-    plt.ylabel("Count")
-    plt.title("Histogram of optimized frame rates")
-    plt.legend(loc="upper left")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    ax.set_xlabel("Optimized frame rate [fps]")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Histogram of optimized frame rates\nStation(s): {stations_str}")
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_ft_interval_histogram(ft_times: np.ndarray, output_path: Path) -> None:
@@ -898,7 +918,7 @@ def analyze_single_mkv(
     ft_times: np.ndarray,
     plot_output: Path | None,
     print_offsets_by_frame: bool,
-) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, str]:
     """Run full MKV-vs-FT timing analysis and return raw/optimized artifacts."""
 
     # End-to-end analysis for one MKV against provided FT times.
@@ -955,12 +975,18 @@ def analyze_single_mkv(
     if plot_output is not None:
         created = try_create_plot(
             f"offset plot ({plot_output})",
-            lambda: plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output),
+            lambda: plot_offsets(offsets, optimized_offsets, frame_rate, optimized_fps, plot_output, station_id),
         )
         if created:
             print(f"Saved offset plot to: {plot_output}")
 
-    return offsets, optimized_offsets, optimized_fps, optimized_implied_times
+    return (
+        offsets,
+        optimized_offsets,
+        optimized_fps,
+        optimized_implied_times,
+        station_id,
+    )
 
 
 def run_batch_mkv_task(
@@ -979,7 +1005,7 @@ def run_batch_mkv_task(
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
-        nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times = analyze_single_mkv(
+        nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times, station_id_out = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
@@ -996,6 +1022,7 @@ def run_batch_mkv_task(
         optimized_offsets,
         optimized_fps,
         optimized_implied_times,
+        station_id_out,
     )
 
 
@@ -1143,7 +1170,7 @@ def main() -> int:
         if created:
             print(f"Saved FT interval histogram to: {ft_interval_plot}")
 
-        offsets, optimized_offsets, optimized_fps, optimized_implied_times = analyze_single_mkv(
+        nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times, station_id = analyze_single_mkv(
             mkv_path=mkv_path,
             station_id=station_id,
             mkv_start_utc=mkv_start_utc,
@@ -1282,21 +1309,22 @@ def main() -> int:
                         elif curve_std_ms > OPTIMIZED_CURVE_STD_THRESHOLD_MS:
                             print(f"Discarding curve {label}: std={curve_std_ms:.3f} ms > {OPTIMIZED_CURVE_STD_THRESHOLD_MS:.1f} ms")
                         else:
-                            combined_curves.append((label, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times))
+                            station_id = result[5]
+                            combined_curves.append((label, nominal_offsets, optimized_offsets, optimized_fps, optimized_implied_times, station_id))
 
         if combined_curves:
             # Build derived curve representations for different aggregate plots.
             optimized_only_curves = [
                 (label, optimized_offsets, optimized_fps)
-                for label, _, optimized_offsets, optimized_fps, _ in combined_curves
+                for label, _, optimized_offsets, optimized_fps, _, _ in combined_curves
             ]
-            optimized_curves_with_time = [
-                (label, optimized_offsets, optimized_fps, optimized_implied_times)
-                for label, _, optimized_offsets, optimized_fps, optimized_implied_times in combined_curves
+            optimized_curves_with_time_and_station = [
+                (label, optimized_offsets, optimized_fps, optimized_implied_times, station_id)
+                for label, _, optimized_offsets, optimized_fps, optimized_implied_times, station_id in combined_curves
             ]
             created = try_create_plot(
                 f"combined optimized-offset plot ({plot_output})",
-                lambda: plot_combined_optimized_offsets(optimized_curves_with_time, plot_output),
+                lambda: plot_combined_optimized_offsets(optimized_curves_with_time_and_station, plot_output),
             )
             if created:
                 print(f"\nSaved combined optimized-offset plot to: {plot_output}")
@@ -1306,7 +1334,7 @@ def main() -> int:
             )
             created = try_create_plot(
                 f"2D density offset plot ({density_plot})",
-                lambda: plot_optimized_offset_density(optimized_curves_with_time, density_plot),
+                lambda: plot_optimized_offset_density(optimized_curves_with_time_and_station, density_plot),
             )
             if created:
                 print(f"Saved 2D density offset plot to: {density_plot}")
@@ -1314,7 +1342,7 @@ def main() -> int:
             sample_count = min(5, len(combined_curves))
             sampled_curves = random.sample(combined_curves, k=sample_count)
             print(f"Creating {sample_count} randomly selected single-curve optimized plots")
-            for index, (label, nominal_offsets, offsets, optimized_fps, _) in enumerate(
+            for index, (label, nominal_offsets, offsets, optimized_fps, _, station_id) in enumerate(
                 sampled_curves, start=1
             ):
                 sample_plot = plot_output.with_name(
@@ -1322,13 +1350,14 @@ def main() -> int:
                 )
                 created = try_create_plot(
                     f"single optimized curve plot ({sample_plot})",
-                    lambda label=label, nominal_offsets=nominal_offsets, offsets=offsets, optimized_fps=optimized_fps, sample_plot=sample_plot: plot_single_optimized_curve(
+                    lambda label=label, nominal_offsets=nominal_offsets, offsets=offsets, optimized_fps=optimized_fps, station_id=station_id, sample_plot=sample_plot: plot_single_optimized_curve(
                         label,
                         nominal_offsets,
                         offsets,
                         optimized_fps,
                         args.fps,
                         sample_plot,
+                        station_id,
                     ),
                 )
                 if created:
@@ -1339,7 +1368,7 @@ def main() -> int:
             )
             created = try_create_plot(
                 f"optimized offset-summary band plot ({summary_band_plot})",
-                lambda: plot_optimized_offset_summary_band(optimized_curves_with_time, summary_band_plot),
+                lambda: plot_optimized_offset_summary_band(optimized_curves_with_time_and_station, summary_band_plot),
             )
             if created:
                 print(f"Saved optimized offset-summary band plot to: {summary_band_plot}")
@@ -1350,7 +1379,7 @@ def main() -> int:
             created = try_create_plot(
                 f"optimized offset histogram ({offset_hist_plot})",
                 lambda: plot_optimized_offset_histogram(
-                    optimized_curves_with_time,
+                    optimized_curves_with_time_and_station,
                     offset_hist_plot,
                     color_by_day_of_year=(args.number_of_days > 1)
                 ),
@@ -1364,7 +1393,7 @@ def main() -> int:
             created = try_create_plot(
                 f"optimized frame-rate histogram ({fps_hist_plot})",
                 lambda: plot_optimized_fps_histogram(
-                    optimized_curves_with_time,
+                    optimized_curves_with_time_and_station,
                     fps_hist_plot,
                     color_by_day_of_year=(args.number_of_days > 1)
                 ),
