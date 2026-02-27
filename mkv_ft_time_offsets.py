@@ -475,43 +475,6 @@ def plot_combined_optimized_offsets(
     plt.close()
 
 
-def plot_combined_optimized_offsets_density(
-    curves: list[tuple[str, np.ndarray, float]],
-    output_path: Path,
-) -> None:
-    """Plot a 2-D density map of frame index vs optimized offset."""
-
-    import matplotlib.pyplot as plt
-
-    if not curves:
-        raise ValueError("No optimized curves available to plot")
-
-    frame_indices = np.concatenate(
-        [np.arange(len(curve_offsets), dtype=np.float64) for _, curve_offsets, _ in curves]
-    )
-    all_offsets_ms = np.concatenate(
-        [curve_offsets * 1000.0 for _, curve_offsets, _ in curves]
-    )
-
-    if frame_indices.size == 0:
-        raise ValueError("No frame data available for density plot")
-
-    x_max = int(np.max(frame_indices))
-    x_bins = min(300, max(50, x_max + 1))
-    y_bins = 200
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    density = ax.hist2d(frame_indices, all_offsets_ms, bins=(x_bins, y_bins), cmap="viridis")
-    colorbar = fig.colorbar(density[3], ax=ax)
-    colorbar.set_label("Point density")
-    ax.set_xlabel("Frame index")
-    ax.set_ylabel("Offset (FT - implied) [ms]")
-    ax.set_title("2-D density of optimized MKV offset curves")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-
-
 def sanitize_for_filename(text: str) -> str:
     """Convert free text into a safe filename segment."""
 
@@ -1142,16 +1105,6 @@ def main() -> int:
         )
         if created:
             print(f"\nSaved combined optimized-offset plot to: {plot_output}")
-
-        density_plot = plot_output.with_name(
-            f"{plot_output.stem}_optimized_offset_density.png"
-        )
-        created = try_create_plot(
-            f"combined optimized-offset density plot ({density_plot})",
-            lambda: plot_combined_optimized_offsets_density(optimized_only_curves, density_plot),
-        )
-        if created:
-            print(f"Saved combined optimized-offset density plot to: {density_plot}")
 
         sample_count = min(5, len(combined_curves))
         sampled_curves = random.sample(combined_curves, k=sample_count)
